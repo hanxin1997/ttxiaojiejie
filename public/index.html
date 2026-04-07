@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Folder Library</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Docker + Mihon Local Source</p>
+          <h1>套图目录整理台</h1>
+          <p class="hero-copy">
+            扫描图片文件夹，自动提取封面、漫画名、卷名和章节，并生成 Mihon 可读的本地源目录。
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button id="scan-button" class="action-button action-primary" type="button">立即扫描</button>
+          <button id="export-button" class="action-button" type="button">重新导出 Mihon</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="panel panel-settings">
+          <div class="panel-header">
+            <h2>扫描配置</h2>
+            <p id="scan-status-text" class="muted"></p>
+          </div>
+
+          <form id="settings-form" class="settings-form">
+            <label>
+              <span>图库根目录</span>
+              <input id="library-root" name="libraryRoot" type="text" placeholder="/library" />
+            </label>
+
+            <label>
+              <span>扫描周期（分钟）</span>
+              <input id="scan-interval" name="scanIntervalMinutes" type="number" min="0" />
+            </label>
+
+            <label class="checkbox-row">
+              <input id="auto-export" name="autoExportToMihon" type="checkbox" />
+              <span>扫描完成后自动生成 Mihon 导出目录</span>
+            </label>
+
+            <div class="inline-grid">
+              <label>
+                <span>文件夹分隔符</span>
+                <input id="separator" name="separator" type="text" maxlength="3" />
+              </label>
+              <label>
+                <span>标题段索引</span>
+                <input id="title-segment-index" name="titleSegmentIndex" type="number" min="0" />
+              </label>
+              <label>
+                <span>分类段索引</span>
+                <input id="category-segment-index" name="categorySegmentIndex" type="number" min="0" />
+              </label>
+            </div>
+
+            <label>
+              <span>尾部忽略词</span>
+              <input id="strip-tokens" name="stripTokens" type="text" placeholder="图片, photos" />
+            </label>
+
+            <label>
+              <span>叶子目录章节名模板</span>
+              <input id="chapter-template" name="directImageChapterTemplate" type="text" placeholder="{count}P" />
+            </label>
+
+            <div class="form-actions">
+              <button class="action-button action-primary" type="submit">保存配置</button>
+            </div>
+          </form>
+
+          <div class="section-divider"></div>
+
+          <section class="category-manager">
+            <div class="subsection-header">
+              <div>
+                <h3>分类目录</h3>
+                <p class="muted">新增分类后，直接选择对应的文件夹。该文件夹下的漫画会自动归到这个分类。</p>
+              </div>
+              <button id="add-category-button" class="action-button" type="button">添加分类</button>
+            </div>
+
+            <div id="category-list" class="category-list"></div>
+
+            <div class="form-actions">
+              <button id="save-category-button" class="action-button action-primary" type="button">保存分类目录</button>
+            </div>
+          </section>
+        </section>
+
+        <section class="panel panel-library">
+          <div class="panel-header">
+            <h2>图库概览</h2>
+            <p id="summary-text" class="muted"></p>
+          </div>
+
+          <div class="summary-grid" id="summary-grid"></div>
+
+          <div class="filter-row">
+            <label class="filter-field">
+              <span>搜索</span>
+              <input id="search-input" type="search" placeholder="漫画名 / 原目录名 / 相对路径" />
+            </label>
+            <label class="filter-field">
+              <span>分类</span>
+              <select id="category-filter">
+                <option value="">全部</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="series-grid" class="series-grid"></div>
+        </section>
+
+        <section class="panel panel-detail">
+          <div class="panel-header">
+            <h2>漫画详情</h2>
+            <p id="detail-caption" class="muted">点击左侧卡片查看卷和章节。</p>
+          </div>
+
+          <div id="detail-view" class="detail-view empty-state">还没有选中漫画。</div>
+        </section>
+      </main>
+    </div>
+
+    <template id="summary-card-template">
+      <article class="summary-card">
+        <p class="summary-label"></p>
+        <strong class="summary-value"></strong>
+      </article>
+    </template>
+
+    <datalist id="category-suggestions"></datalist>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,11 @@
+node_modules/
+data/
+
+.DS_Store
+Thumbs.db
+
+*.log
+
+mihon/android-extension/.gradle/
+mihon/android-extension/local.properties
+mihon/android-extension/**/build/
