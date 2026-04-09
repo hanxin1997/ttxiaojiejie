@@ -34,10 +34,10 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Set up Gradle 9.3.1
+      - name: Set up Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 9.3.1
+          gradle-version: 8.13
 
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses > /dev/null

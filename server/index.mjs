@@ -5,7 +5,11 @@ import path from 'node:path';
 import { URL } from 'node:url';
 
 import { loadConfig } from './config.mjs';
-import { syncMihonExport } from './exporter.mjs';
+import {
+  FolderBrowseError,
+  browseAvailableFolders as browseFolderTree,
+  listAvailableFolders as listFolderOptions,
+} from './folders.mjs';
 import { scanLibrary } from './scanner.mjs';
 import { AppStore } from './store.mjs';
 import {
@@ -13,8 +17,6 @@ import {
   formatDateTime,
   naturalCompare,
   normalizeArray,
-  normalizeRelativeFolderPath,
-  toPosixPath,
 } from './utils.mjs';
 
 const config = loadConfig();
@@ -155,11 +157,25 @@ async function serveFile(response, filePath) {
 async function listRelativeFolders(libraryRoot) {
   const items = [{ path: '', label: '根目录' }];
 
+  let rootStats;
+  try {
+    rootStats = await fsp.stat(libraryRoot);
+  } catch {
+    throw new Error(`图库根目录不存在或不可读: ${libraryRoot}`);
+  }
+
+  if (!rootStats.isDirectory()) {
+    throw new Error(`图库根目录不是文件夹: ${libraryRoot}`);
+  }
+
   async function walk(currentDir) {
     let entries = [];
     try {
       entries = await fsp.readdir(currentDir, { withFileTypes: true });
     } catch {
+      if (currentDir === libraryRoot) {
+        throw new Error(`无法读取图库根目录: ${libraryRoot}`);
+      }
       return;
     }
 
@@ -181,6 +197,84 @@ async function listRelativeFolders(libraryRoot) {
   }
 
   await walk(libraryRoot);
+  return items;
+}
+
+async function listAbsoluteFolders(rootPath, options = {}) {
+  const items = [];
+  const seen = options.seen ?? new Set();
+  const nestedRoots = options.nestedRoots ?? new Set();
+
+  function pushFolder(folderPath) {
+    if (seen.has(folderPath)) {
+      return;
+    }
+
+    seen.add(folderPath);
+    items.push({
+      path: folderPath,
+      label: folderPath,
+    });
+  }
+
+  pushFolder(rootPath);
+
+  let rootStats;
+  try {
+    rootStats = await fsp.stat(rootPath);
+  } catch {
+    return items;
+  }
+
+  if (!rootStats.isDirectory()) {
+    return items;
+  }
+
+  async function walk(currentDir) {
+    let entries = [];
+    try {
+      entries = await fsp.readdir(currentDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    entries.sort((left, right) => naturalCompare(left.name, right.name));
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const absolutePath = path.join(currentDir, entry.name);
+      pushFolder(absolutePath);
+
+      if (nestedRoots.has(absolutePath) && absolutePath !== rootPath) {
+        continue;
+      }
+
+      await walk(absolutePath);
+    }
+  }
+
+  await walk(rootPath);
+  return items;
+}
+
+async function listAvailableFolders(libraryRoot) {
+  const mountRoots = await listMountRoots();
+  if (mountRoots.length === 0) {
+    return listRelativeFolders(libraryRoot);
+  }
+
+  const items = [];
+  const seen = new Set();
+  const nestedRoots = new Set(mountRoots);
+
+  for (const mountRoot of mountRoots) {
+    const rootItems = await listAbsoluteFolders(mountRoot, { seen, nestedRoots });
+    items.push(...rootItems);
+  }
+
   return items;
 }
 
@@ -219,14 +313,6 @@ class ScanCoordinator {
     }, intervalMinutes * 60 * 1000);
   }
 
-  async exportCurrentLibrary() {
-    const library = store.getLibrary();
-    const exportInfo = await syncMihonExport(library, this.config.mihonExportRoot);
-    library.exportInfo = exportInfo;
-    await this.store.replaceLibrary(library);
-    return exportInfo;
-  }
-
   async run(trigger) {
     if (this.currentTask) {
       return this.currentTask;
@@ -246,10 +332,6 @@ class ScanCoordinator {
         const settings = this.store.getSettings();
         const overrides = this.store.getOverrides();
         const library = await scanLibrary(settings, overrides);
-
-        if (settings.autoExportToMihon) {
-          library.exportInfo = await syncMihonExport(library, this.config.mihonExportRoot);
-        }
 
         await this.store.replaceLibrary(library);
         this.schedule();
@@ -297,8 +379,6 @@ function buildStatePayload() {
     issues: library.issues,
     lastScanAt: library.lastScanAt,
     lastScanLabel: formatDateTime(library.lastScanAt),
-    exportInfo: library.exportInfo,
-    exportRoot: config.mihonExportRoot,
     knownCategories,
   };
 }
@@ -319,8 +399,26 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === 'GET' && pathname === '/api/folders') {
-      const items = await listRelativeFolders(path.resolve(store.getSettings().libraryRoot));
+      const items = await listFolderOptions(path.resolve(store.getSettings().libraryRoot));
       json(response, 200, { items });
+      return;
+    }
+
+    if (request.method === 'GET' && pathname === '/api/folders/browse') {
+      try {
+        const payload = await browseFolderTree(
+          path.resolve(store.getSettings().libraryRoot),
+          requestUrl.searchParams.get('path') ?? '',
+        );
+        json(response, 200, payload);
+      } catch (error) {
+        if (error instanceof FolderBrowseError) {
+          json(response, error.statusCode ?? 400, { error: error.message });
+          return;
+        }
+
+        throw error;
+      }
       return;
     }
 
@@ -402,12 +500,6 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && pathname === '/api/scan') {
       await scanner.run('manual');
       json(response, 200, { ok: true, state: buildStatePayload() });
-      return;
-    }
-
-    if (request.method === 'POST' && pathname === '/api/export') {
-      const exportInfo = await scanner.exportCurrentLibrary();
-      json(response, 200, { ok: true, exportInfo });
       return;
     }
 

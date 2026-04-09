@@ -4,8 +4,8 @@ import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { syncMihonExport } from '../server/exporter.mjs';
 import { scanLibrary } from '../server/scanner.mjs';
+import { toPosixPath } from '../server/utils.mjs';
 
 async function createFile(targetPath, content = 'image') {
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
@@ -16,16 +16,16 @@ function createSettings(libraryRoot, overrides = {}) {
   return {
     libraryRoot,
     scanIntervalMinutes: 15,
-    autoExportToMihon: true,
+    autoExportToMihon: false,
     folderPattern: {
       enabled: true,
       separator: '-',
       titleSegmentIndex: 0,
       categorySegmentIndex: 1,
-      stripTokens: ['图片'],
+      stripTokens: ['images'],
     },
     naming: {
-      defaultVolumeName: '默认卷',
+      defaultVolumeName: 'Default Volume',
       directImageChapterTemplate: '{count}P',
     },
     categoryFolders: [],
@@ -36,7 +36,7 @@ function createSettings(libraryRoot, overrides = {}) {
 test('scanLibrary parses folder title, category, cover, volumes, and chapters', async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'folder-library-scan-'));
   const libraryRoot = path.join(tempRoot, 'library');
-  const seriesRoot = path.join(libraryRoot, 'Alice-Cosplay-图片');
+  const seriesRoot = path.join(libraryRoot, 'Alice-Cosplay-images');
 
   await createFile(path.join(seriesRoot, 'Vol.1', '1.jpg'));
   await createFile(path.join(seriesRoot, 'Vol.1', '2.jpg'));
@@ -45,7 +45,7 @@ test('scanLibrary parses folder title, category, cover, volumes, and chapters', 
 
   const snapshot = await scanLibrary(createSettings(libraryRoot), {
     seriesCategories: {
-      'Alice-Cosplay-图片': ['写真'],
+      'Alice-Cosplay-images': ['Photo'],
     },
   });
 
@@ -53,14 +53,14 @@ test('scanLibrary parses folder title, category, cover, volumes, and chapters', 
   assert.equal(snapshot.stats.volumeCount, 2);
   assert.equal(snapshot.stats.chapterCount, 2);
   assert.equal(snapshot.stats.pageCount, 4);
-  assert.deepEqual(new Set(snapshot.stats.categories), new Set(['Cosplay', '写真']));
+  assert.deepEqual(new Set(snapshot.stats.categories), new Set(['Cosplay', 'Photo']));
 
   const series = snapshot.series[0];
   assert.equal(series.title, 'Alice');
   assert.equal(series.cover.fileName, '1.jpg');
   assert.deepEqual(series.categories.auto, ['Cosplay']);
   assert.deepEqual(series.categories.folder, []);
-  assert.deepEqual(series.categories.manual, ['写真']);
+  assert.deepEqual(series.categories.manual, ['Photo']);
   assert.equal(series.volumes[0].title, 'Vol.1');
   assert.equal(series.volumes[0].chapters[0].title, '2P');
   assert.equal(series.volumes[1].chapters[0].title, 'Chapter A');
@@ -70,53 +70,61 @@ test('scanLibrary supports explicit category folder bindings', async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'folder-library-category-'));
   const libraryRoot = path.join(tempRoot, 'library');
 
-  await createFile(path.join(libraryRoot, '热门', 'Alice-图片', 'Vol.1', '1.jpg'));
-  await createFile(path.join(libraryRoot, '热门', 'Alice-图片', 'Vol.1', '2.jpg'));
-  await createFile(path.join(libraryRoot, 'Bob-图片', 'Vol.1', '1.jpg'));
+  await createFile(path.join(libraryRoot, 'featured', 'Alice-images', 'Vol.1', '1.jpg'));
+  await createFile(path.join(libraryRoot, 'featured', 'Alice-images', 'Vol.1', '2.jpg'));
+  await createFile(path.join(libraryRoot, 'Bob-images', 'Vol.1', '1.jpg'));
 
   const snapshot = await scanLibrary(
     createSettings(libraryRoot, {
-      categoryFolders: [{ name: '热门推荐', folder: '热门' }],
+      categoryFolders: [{ name: 'Featured', folder: 'featured' }],
     }),
     { seriesCategories: {} },
   );
 
   assert.equal(snapshot.stats.seriesCount, 2);
-  assert.ok(snapshot.stats.categories.includes('热门推荐'));
+  assert.ok(snapshot.stats.categories.includes('Featured'));
 
   const alice = snapshot.series.find((item) => item.title === 'Alice');
   const bob = snapshot.series.find((item) => item.title === 'Bob');
 
-  assert.deepEqual(alice.categories.folder, ['热门推荐']);
+  assert.deepEqual(alice.categories.folder, ['Featured']);
   assert.deepEqual(bob.categories.folder, []);
-  assert.equal(alice.sourceKey, '热门/Alice-图片');
+  assert.equal(alice.sourceKey, 'featured/Alice-images');
 });
 
-test('syncMihonExport writes local source structure', async () => {
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'folder-library-export-'));
+test('scanLibrary supports absolute category folder bindings outside the library root', async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'folder-library-absolute-category-'));
   const libraryRoot = path.join(tempRoot, 'library');
-  const exportRoot = path.join(tempRoot, 'mihon', 'local');
-  const seriesRoot = path.join(libraryRoot, 'Bob-写真-图片');
+  const externalRoot = path.join(tempRoot, 'albums');
+  const externalSeriesRoot = path.join(externalRoot, 'Alice-images');
+  const externalSourceKey = toPosixPath(path.resolve(externalSeriesRoot));
 
-  await createFile(path.join(seriesRoot, 'Vol.1', '1.jpg'));
-  await createFile(path.join(seriesRoot, 'Vol.1', '2.jpg'));
+  await createFile(path.join(libraryRoot, 'Bob-images', 'Vol.1', '1.jpg'));
+  await createFile(path.join(externalSeriesRoot, 'Vol.1', '1.jpg'));
+  await createFile(path.join(externalSeriesRoot, 'Vol.1', '2.jpg'));
 
-  const snapshot = await scanLibrary(createSettings(libraryRoot), { seriesCategories: {} });
-  const exportInfo = await syncMihonExport(snapshot, exportRoot);
+  const snapshot = await scanLibrary(
+    createSettings(libraryRoot, {
+      categoryFolders: [{ name: 'Albums', folder: externalRoot }],
+    }),
+    {
+      seriesCategories: {
+        [externalSourceKey]: ['Pinned'],
+      },
+    },
+  );
 
-  assert.equal(exportInfo.seriesCount, 1);
-  assert.equal(exportInfo.chapterCount, 1);
+  assert.equal(snapshot.stats.seriesCount, 2);
+  assert.ok(snapshot.stats.categories.includes('Albums'));
+  assert.ok(snapshot.stats.categories.includes('Pinned'));
 
-  const rootEntries = await fs.readdir(exportRoot);
-  assert.ok(rootEntries.includes('.nomedia'));
+  const alice = snapshot.series.find((item) => item.sourceKey === externalSourceKey);
+  const bob = snapshot.series.find((item) => item.title === 'Bob');
 
-  const seriesEntries = await fs.readdir(path.join(exportRoot, 'Bob'));
-  assert.ok(seriesEntries.includes('cover.jpg'));
-  assert.ok(seriesEntries.includes('details.json'));
-
-  const chapterDirs = seriesEntries.filter((entry) => entry.startsWith('0001'));
-  assert.equal(chapterDirs.length, 1);
-
-  const chapterEntries = await fs.readdir(path.join(exportRoot, 'Bob', chapterDirs[0]));
-  assert.deepEqual(chapterEntries, ['0001.jpg', '0002.jpg']);
+  assert.ok(alice);
+  assert.ok(bob);
+  assert.deepEqual(alice.categories.folder, ['Albums']);
+  assert.deepEqual(alice.categories.manual, ['Pinned']);
+  assert.equal(alice.sourceKey, externalSourceKey);
+  assert.deepEqual(bob.categories.folder, []);
 });

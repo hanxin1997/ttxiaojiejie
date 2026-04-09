@@ -97,10 +97,56 @@ function isSameOrChildFolder(parentFolder, childFolder) {
   return childFolder === parentFolder || childFolder.startsWith(`${parentFolder}/`);
 }
 
-function resolveFolderCategories(seriesSourceKey, settings) {
+function isAbsoluteConfiguredFolder(folder) {
+  const normalized = String(folder ?? '').trim();
+  return Boolean(normalized) && (normalized.startsWith('/') || path.isAbsolute(normalized));
+}
+
+function resolveConfiguredFolderPath(folder, libraryRoot) {
+  const normalized = String(folder ?? '').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  if (isAbsoluteConfiguredFolder(normalized)) {
+    return path.resolve(normalized);
+  }
+
+  const relativeFolder = normalizeRelativeFolderPath(normalized);
+  return relativeFolder ? path.resolve(libraryRoot, relativeFolder) : '';
+}
+
+function isPathInside(parentPath, childPath) {
+  const relativePath = path.relative(path.resolve(parentPath), path.resolve(childPath));
+  return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
+}
+
+function buildSeriesSourceKey(seriesDir, libraryRoot) {
+  const absoluteSeriesDir = path.resolve(seriesDir);
+  if (isPathInside(libraryRoot, absoluteSeriesDir)) {
+    return toPosixPath(path.relative(libraryRoot, absoluteSeriesDir));
+  }
+
+  return toPosixPath(absoluteSeriesDir);
+}
+
+function resolveFolderCategories(seriesDir, seriesSourceKey, settings, libraryRoot) {
+  const absoluteSeriesDir = toPosixPath(path.resolve(seriesDir));
   return normalizeArray(
     (settings.categoryFolders ?? [])
-      .filter((item) => item.folder && isSameOrChildFolder(item.folder, seriesSourceKey))
+      .filter((item) => {
+        const folder = String(item.folder ?? '').trim();
+        if (!folder) {
+          return false;
+        }
+
+        if (isAbsoluteConfiguredFolder(folder)) {
+          return isSameOrChildFolder(toPosixPath(path.resolve(folder)), absoluteSeriesDir);
+        }
+
+        const relativeFolder = normalizeRelativeFolderPath(folder);
+        return relativeFolder ? isSameOrChildFolder(relativeFolder, seriesSourceKey) : false;
+      })
       .map((item) => item.name),
   );
 }
@@ -175,9 +221,9 @@ async function collectVolumeChapters(volumeDir, volumeTitle, settings, seriesSou
 
 async function scanSeries(seriesDir, libraryRoot, settings, overrides) {
   const folderName = path.basename(seriesDir);
-  const seriesSourceKey = toPosixPath(path.relative(libraryRoot, seriesDir));
+  const seriesSourceKey = buildSeriesSourceKey(seriesDir, libraryRoot);
   const { title, autoCategories } = parseFolderMetadata(folderName, settings.folderPattern);
-  const folderCategories = resolveFolderCategories(seriesSourceKey, settings);
+  const folderCategories = resolveFolderCategories(seriesDir, seriesSourceKey, settings, libraryRoot);
   const manualCategories = normalizeArray(overrides.seriesCategories[seriesSourceKey]);
   const volumes = [];
 
@@ -261,14 +307,24 @@ async function scanSeries(seriesDir, libraryRoot, settings, overrides) {
   };
 }
 
-function shouldSkipRootChild(relativePath, settings) {
+function shouldSkipRootChild(childDir, settings, libraryRoot) {
+  const relativePath = toPosixPath(path.relative(libraryRoot, childDir));
+  const absolutePath = toPosixPath(path.resolve(childDir));
+  const absoluteLibraryRoot = toPosixPath(path.resolve(libraryRoot));
+
   return (settings.categoryFolders ?? []).some((item) => {
-    const folder = normalizeRelativeFolderPath(item.folder);
+    const folder = String(item.folder ?? '').trim();
     if (!folder) {
       return false;
     }
 
-    return isSameOrChildFolder(relativePath, folder);
+    if (isAbsoluteConfiguredFolder(folder)) {
+      const absoluteFolder = toPosixPath(path.resolve(folder));
+      return absoluteFolder === absoluteLibraryRoot || isSameOrChildFolder(absolutePath, absoluteFolder);
+    }
+
+    const relativeFolder = normalizeRelativeFolderPath(folder);
+    return relativeFolder ? isSameOrChildFolder(relativePath, relativeFolder) : false;
   });
 }
 
@@ -277,15 +333,16 @@ async function collectCandidateSeriesDirs(libraryRoot, settings) {
   const rootChildren = await listSubdirectories(libraryRoot);
 
   for (const childDir of rootChildren) {
-    const relativePath = toPosixPath(path.relative(libraryRoot, childDir));
-    if (!shouldSkipRootChild(relativePath, settings)) {
+    if (!shouldSkipRootChild(childDir, settings, libraryRoot)) {
       candidates.set(path.resolve(childDir), path.resolve(childDir));
     }
   }
 
   for (const item of settings.categoryFolders ?? []) {
-    const relativeFolder = normalizeRelativeFolderPath(item.folder);
-    const categoryRoot = path.resolve(libraryRoot, relativeFolder);
+    const categoryRoot = resolveConfiguredFolderPath(item.folder, libraryRoot);
+    if (!categoryRoot) {
+      continue;
+    }
 
     try {
       const stats = await fs.stat(categoryRoot);
@@ -303,10 +360,7 @@ async function collectCandidateSeriesDirs(libraryRoot, settings) {
   }
 
   return [...candidates.values()].sort((left, right) => {
-    return naturalCompare(
-      toPosixPath(path.relative(libraryRoot, left)),
-      toPosixPath(path.relative(libraryRoot, right)),
-    );
+    return naturalCompare(buildSeriesSourceKey(left, libraryRoot), buildSeriesSourceKey(right, libraryRoot));
   });
 }
 

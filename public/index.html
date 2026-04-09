@@ -10,15 +10,14 @@
     <div class="page-shell">
       <header class="hero">
         <div>
-          <p class="eyebrow">Docker + Mihon Local Source</p>
+          <p class="eyebrow">Docker + Mihon Extension</p>
           <h1>套图目录整理台</h1>
           <p class="hero-copy">
-            扫描图片文件夹，自动提取封面、漫画名、卷名和章节，并生成 Mihon 可读的本地源目录。
+            扫描图片文件夹，提取封面、漫画名、卷名和章节信息，供 Mihon 扩展按需读取原图。
           </p>
         </div>
         <div class="hero-actions">
           <button id="scan-button" class="action-button action-primary" type="button">立即扫描</button>
-          <button id="export-button" class="action-button" type="button">重新导出 Mihon</button>
         </div>
       </header>
 
@@ -38,11 +37,6 @@
             <label>
               <span>扫描周期（分钟）</span>
               <input id="scan-interval" name="scanIntervalMinutes" type="number" min="0" />
-            </label>
-
-            <label class="checkbox-row">
-              <input id="auto-export" name="autoExportToMihon" type="checkbox" />
-              <span>扫描完成后自动生成 Mihon 导出目录</span>
             </label>
 
             <div class="inline-grid">
@@ -78,18 +72,27 @@
           <div class="section-divider"></div>
 
           <section class="category-manager">
-            <div class="subsection-header">
+            <div class="subsection-header library-section-header">
               <div>
-                <h3>分类目录</h3>
-                <p class="muted">新增分类后，直接选择对应的文件夹。该文件夹下的漫画会自动归到这个分类。</p>
+                <p class="section-kicker">Category Libraries</p>
+                <h3>分类库</h3>
+                <p class="muted">参考 Komga 的管理方式：页面只展示已有分类，新增或编辑时再打开独立对话框选择路径。</p>
               </div>
-              <button id="add-category-button" class="action-button" type="button">添加分类</button>
+              <div class="toolbar-actions">
+                <button id="add-category-button" class="action-button action-primary" type="button">添加分类</button>
+              </div>
             </div>
 
-            <div id="category-list" class="category-list"></div>
+            <div class="library-shelf">
+              <div class="library-shelf-head">
+                <div>
+                  <p class="library-shelf-title">已配置分类</p>
+                  <p class="muted">每个分类绑定一个目录。保存后，该目录下的漫画会自动归入对应分类。</p>
+                </div>
+                <button id="save-category-button" class="action-button" type="button">应用变更</button>
+              </div>
 
-            <div class="form-actions">
-              <button id="save-category-button" class="action-button action-primary" type="button">保存分类目录</button>
+              <div id="category-list" class="category-list"></div>
             </div>
           </section>
         </section>
@@ -135,6 +138,73 @@
         <strong class="summary-value"></strong>
       </article>
     </template>
+
+    <section id="category-dialog" class="dialog-shell" hidden aria-hidden="true">
+      <div class="dialog-backdrop"></div>
+      <div class="dialog-panel" role="dialog" aria-modal="true" aria-labelledby="category-dialog-title">
+        <div class="dialog-header">
+          <div>
+            <p class="section-kicker">Category Library</p>
+            <h3 id="category-dialog-title">添加分类</h3>
+          </div>
+          <button class="action-button dialog-close-button" type="button">关闭</button>
+        </div>
+
+        <div class="dialog-body">
+          <label class="dialog-field">
+            <span>分类名称</span>
+            <input id="category-dialog-name" type="text" placeholder="例如：清纯写真" />
+          </label>
+
+          <label class="dialog-field">
+            <span>目录路径</span>
+            <div class="dialog-path-row">
+              <input id="category-dialog-folder" type="text" placeholder="/library/清纯" readonly />
+              <button id="category-dialog-browse" class="action-button" type="button">浏览</button>
+            </div>
+          </label>
+        </div>
+
+        <div class="dialog-footer">
+          <button class="action-button" type="button">取消</button>
+          <button class="action-button action-primary" type="button">保存分类</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="folder-browser-dialog" class="dialog-shell" hidden aria-hidden="true">
+      <div class="dialog-backdrop"></div>
+      <div class="dialog-panel dialog-panel-browser" role="dialog" aria-modal="true" aria-labelledby="folder-browser-title">
+        <div class="dialog-header">
+          <div>
+            <p class="section-kicker">Browse Path</p>
+            <h3 id="folder-browser-title">选择目录</h3>
+          </div>
+          <button class="action-button dialog-close-button" type="button">关闭</button>
+        </div>
+
+        <div class="dialog-body dialog-browser-body">
+          <div class="dialog-path-preview">
+            <span>当前路径</span>
+            <strong id="folder-browser-current-path">未选择</strong>
+          </div>
+
+          <div class="dialog-browser-grid">
+            <button id="folder-browser-parent-button" class="browser-item browser-item-parent" type="button">
+              返回上级目录
+            </button>
+            <div id="folder-browser-list" class="browser-list"></div>
+          </div>
+        </div>
+
+        <div class="dialog-footer">
+          <button class="action-button" type="button">取消</button>
+          <button id="folder-browser-confirm-button" class="action-button action-primary" type="button">
+            选择当前目录
+          </button>
+        </div>
+      </div>
+    </section>
 
     <datalist id="category-suggestions"></datalist>
     <script type="module" src="/app.js"></script>

@@ -42,7 +42,7 @@ function normalizeCategoryFolders(categoryFolders) {
 
   for (const item of categoryFolders ?? []) {
     const name = String(item?.name ?? '').trim();
-    const folder = normalizeRelativeFolderPath(item?.folder ?? '');
+    const folder = normalizeCategoryFolderPath(item?.folder ?? '');
 
     if (!name) {
       continue;
@@ -63,6 +63,59 @@ function normalizeCategoryFolders(categoryFolders) {
   return [...merged.values()].sort((left, right) => naturalCompare(left.name, right.name));
 }
 
+function normalizeAbsoluteFolderPath(value) {
+  const raw = String(value ?? '')
+    .trim()
+    .replaceAll('\\', '/')
+    .replace(/\/+/g, '/');
+
+  if (!raw || !raw.startsWith('/')) {
+    return '';
+  }
+
+  const normalized = raw === '/' ? '/' : raw.replace(/\/+$/, '');
+  const parts = normalized.split('/').filter((part) => part && part !== '.');
+  if (parts.some((part) => part === '..')) {
+    return '';
+  }
+
+  return parts.length === 0 ? '/' : `/${parts.join('/')}`;
+}
+
+function normalizeCategoryFolderPath(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  if (/^[A-Za-z]:[\\/]/.test(raw) || /^\\\\/.test(raw)) {
+    return '';
+  }
+
+  if (raw.startsWith('/')) {
+    return normalizeAbsoluteFolderPath(raw);
+  }
+
+  return normalizeRelativeFolderPath(raw);
+}
+
+function getPathFlavor(value) {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) {
+    return 'empty';
+  }
+
+  if (/^[A-Za-z]:[\\/]/.test(normalized) || /^\\\\/.test(normalized)) {
+    return 'windows';
+  }
+
+  if (normalized.startsWith('/')) {
+    return 'posix';
+  }
+
+  return 'relative';
+}
+
 function normalizeSettings(settings, defaults) {
   const source = settings ?? {};
   const interval = Number.parseInt(String(source.scanIntervalMinutes ?? defaults.scanIntervalMinutes), 10);
@@ -70,7 +123,7 @@ function normalizeSettings(settings, defaults) {
   return {
     libraryRoot: String(source.libraryRoot ?? defaults.libraryRoot).trim() || defaults.libraryRoot,
     scanIntervalMinutes: Number.isFinite(interval) ? Math.max(interval, 0) : defaults.scanIntervalMinutes,
-    autoExportToMihon: source.autoExportToMihon ?? defaults.autoExportToMihon,
+    autoExportToMihon: false,
     folderPattern: normalizeFolderPattern(source.folderPattern, defaults.folderPattern),
     naming: normalizeNaming(source.naming, defaults.naming),
     categoryFolders: normalizeCategoryFolders(source.categoryFolders ?? defaults.categoryFolders),
@@ -116,6 +169,44 @@ function normalizeState(rawState, defaults) {
   };
 }
 
+async function migrateLibraryRoot(settings, defaults) {
+  const configuredRoot = String(settings.libraryRoot ?? '').trim();
+  const defaultRoot = String(defaults.libraryRoot ?? '').trim();
+
+  if (!configuredRoot || !defaultRoot || configuredRoot === defaultRoot) {
+    return { settings, changed: false };
+  }
+
+  const configuredFlavor = getPathFlavor(configuredRoot);
+  const defaultFlavor = getPathFlavor(defaultRoot);
+
+  if (
+    configuredFlavor === 'relative' ||
+    configuredFlavor === 'empty' ||
+    defaultFlavor === 'relative' ||
+    defaultFlavor === 'empty' ||
+    configuredFlavor === defaultFlavor
+  ) {
+    return { settings, changed: false };
+  }
+
+  if (await pathExists(configuredRoot)) {
+    return { settings, changed: false };
+  }
+
+  if (!(await pathExists(defaultRoot))) {
+    return { settings, changed: false };
+  }
+
+  return {
+    settings: {
+      ...settings,
+      libraryRoot: defaultRoot,
+    },
+    changed: true,
+  };
+}
+
 function mergeSettings(currentSettings, nextSettings) {
   return {
     ...currentSettings,
@@ -144,7 +235,19 @@ export class AppStore {
 
     if (await pathExists(this.config.stateFile)) {
       const raw = await fs.readFile(this.config.stateFile, 'utf8');
-      this.state = normalizeState(safeJsonParse(raw, null), this.config.defaultSettings);
+      const parsedState = safeJsonParse(raw, null);
+      const nextState = normalizeState(parsedState, this.config.defaultSettings);
+      const migration = await migrateLibraryRoot(nextState.settings, this.config.defaultSettings);
+      const disabledLegacyAutoExport = parsedState?.settings?.autoExportToMihon !== undefined;
+      this.state = {
+        ...nextState,
+        settings: migration.settings,
+      };
+
+      if (migration.changed || disabledLegacyAutoExport) {
+        await this.persist();
+      }
+
       return;
     }
 

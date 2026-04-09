@@ -9,9 +9,7 @@ services:
       PORT: 4321
       DATA_DIR: /data
       LIBRARY_ROOT: /library
-      MIHON_EXPORT_ROOT: /exports/local
       SCAN_INTERVAL_MINUTES: 15
     volumes:
       - ./data:/data
       - ./library:/library:ro
-      - ./mihon:/exports

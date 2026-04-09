@@ -16,6 +16,8 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -271,7 +273,9 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
         }
 
         return try {
-            normalizeCategories(json.decodeFromString<List<String>>(raw))
+            normalizeCategories(
+                json.decodeFromString(ListSerializer(String.serializer()), raw),
+            )
         } catch (_: Exception) {
             emptyList()
         }
@@ -281,7 +285,10 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
         val normalized = normalizeCategories(categories)
         preferences.edit()
             .putString(PREF_CATEGORY_CACHE_BASE_URL, baseUrl)
-            .putString(PREF_CATEGORY_CACHE_VALUES, json.encodeToString(normalized))
+            .putString(
+                PREF_CATEGORY_CACHE_VALUES,
+                json.encodeToString(ListSerializer(String.serializer()), normalized),
+            )
             .putLong(PREF_CATEGORY_CACHE_FETCHED_AT, System.currentTimeMillis())
             .apply()
     }
