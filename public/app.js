@@ -269,9 +269,11 @@ function renderMeta(meta, forceCategoryReset = false) {
     elements.summaryGrid.appendChild(node);
   }
 
-  const currentValue = state.category;
+  const availableCategories = meta.knownCategories;
+  const currentValue = availableCategories.includes(state.category) ? state.category : '';
+  state.category = currentValue;
   elements.categoryFilter.innerHTML = '<option value="">全部</option>';
-  for (const category of meta.knownCategories) {
+  for (const category of availableCategories) {
     const option = document.createElement('option');
     option.value = category;
     option.textContent = category;
@@ -281,7 +283,7 @@ function renderMeta(meta, forceCategoryReset = false) {
     elements.categoryFilter.appendChild(option);
   }
 
-  renderCategorySuggestions(meta.knownCategories);
+  renderCategorySuggestions(availableCategories);
 }
 
 function renderSeriesList() {
@@ -312,7 +314,7 @@ function renderSeriesList() {
           <p class="series-source">${escapeHtml(item.sourceKey)}</p>
           <p class="series-meta">${item.counts.volumes} 卷 / ${item.counts.chapters} 章 / ${item.counts.pages} 页</p>
           <div class="tag-row">
-            ${item.categories.effective.map((category) => `<span class="tag">${escapeHtml(category)}</span>`).join('')}
+            ${item.categories.folder.map((category) => `<span class="tag">${escapeHtml(category)}</span>`).join('')}
           </div>
         </div>
       </button>
@@ -354,8 +356,7 @@ function renderDetail() {
       <div class="detail-copy">
         <p class="detail-title">${escapeHtml(detail.title)}</p>
         <p class="detail-meta">${detail.counts.volumes} 卷 / ${detail.counts.chapters} 章 / ${detail.counts.pages} 页</p>
-        <p class="muted">目录分类：${detail.categories.folder.join('，') || '无'}</p>
-        <p class="muted">目录名分类：${detail.categories.auto.join('，') || '无'}</p>
+        <p class="muted">分类：${detail.categories.folder.join('，') || '无'}</p>
         <label class="detail-category-editor">
           <span>手动分类</span>
           <input
@@ -367,7 +368,7 @@ function renderDetail() {
           />
         </label>
         <div class="tag-row">
-          ${detail.categories.effective.map((category) => `<span class="tag">${escapeHtml(category)}</span>`).join('')}
+          ${detail.categories.folder.map((category) => `<span class="tag">${escapeHtml(category)}</span>`).join('')}
         </div>
         <button id="save-categories-button" class="action-button action-primary" type="button">保存分类</button>
       </div>

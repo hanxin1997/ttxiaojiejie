@@ -367,10 +367,9 @@ const scanner = new ScanCoordinator(store, config);
 function buildStatePayload() {
   const library = store.getLibrary();
   const settings = store.getSettings();
-  const knownCategories = normalizeArray([
-    ...library.stats.categories,
-    ...(settings.categoryFolders ?? []).map((item) => item.name),
-  ]).sort(naturalCompare);
+  const knownCategories = normalizeArray(
+    (settings.categoryFolders ?? []).map((item) => item.name),
+  ).sort(naturalCompare);
 
   return {
     settings,
@@ -448,7 +447,7 @@ const server = http.createServer(async (request, response) => {
             series.sourceKey.toLowerCase().includes(search);
           const matchesCategory =
             category.length === 0 ||
-            series.categories.effective.some((item) => item.toLowerCase() === category);
+            series.categories.folder.some((item) => item.toLowerCase() === category);
           return matchesSearch && matchesCategory;
         })
         .map(buildSeriesListItem);

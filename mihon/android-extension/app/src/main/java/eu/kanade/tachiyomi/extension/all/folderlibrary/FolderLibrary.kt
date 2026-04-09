@@ -101,7 +101,7 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
 
     override fun mangaDetailsParse(response: Response): SManga {
         val detail = response.parseAs<SeriesDetailDto>()
-        rememberCategories(detail.categories.effective)
+        rememberCategories(detail.categories.folder)
         return detail.toSManga(baseUrl)
     }
 
@@ -109,7 +109,7 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val detail = response.parseAs<SeriesDetailDto>()
-        rememberCategories(detail.categories.effective)
+        rememberCategories(detail.categories.folder)
         var chapterNumber = 1F
 
         return detail.volumes.flatMap { volume ->
@@ -155,7 +155,7 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
     private fun parseSeriesList(response: Response): MangasPage {
         val seriesList = response.parseAs<SeriesListResponse>()
         rememberCategories(
-            seriesList.items.flatMap { it.categories.effective },
+            seriesList.items.flatMap { it.categories.folder },
         )
         return MangasPage(
             mangas = seriesList.items.map { it.toSManga(baseUrl) },
@@ -218,16 +218,12 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
 
     private fun loadKnownCategories(): List<String> {
         val cached = readCachedCategories()
-        if (hasCategoryCacheForBaseUrl() && !isCategoryCacheExpired()) {
-            return cached
-        }
-
         val fetched = runBlocking(Dispatchers.IO) {
             fetchKnownCategoriesFromState()
         }
 
         return when (fetched) {
-            null -> cached
+            null -> if (hasCategoryCacheForBaseUrl() && !isCategoryCacheExpired()) cached else emptyList()
             else -> {
                 persistKnownCategories(fetched)
                 fetched
@@ -320,7 +316,7 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
         title = this@toSManga.title
         url = "/api/series/${this@toSManga.id}"
         thumbnail_url = coverUrl?.let { absoluteUrl(baseUrl, it) }
-        genre = categories.effective.joinToString(", ")
+        genre = categories.folder.joinToString(", ")
         description = buildString {
             appendLine("源目录: $sourceKey")
             appendLine("原目录名: $sourceFolderName")
@@ -335,18 +331,16 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
         title = this@toSManga.title
         url = "/api/series/${this@toSManga.id}"
         thumbnail_url = coverUrl?.let { absoluteUrl(baseUrl, it) }
-        genre = categories.effective.joinToString(", ")
-        author = categories.folder.joinToString(", ").ifBlank { null }
-        artist = categories.manual.joinToString(", ").ifBlank { null }
+        genre = categories.folder.joinToString(", ")
+        author = null
+        artist = null
         description = buildString {
             appendLine("源目录: $sourceKey")
             appendLine("实际路径: $sourcePath")
             appendLine("卷数: ${counts.volumes}")
             appendLine("章节: ${counts.chapters}")
             appendLine("图片: ${counts.pages}")
-            if (categories.auto.isNotEmpty()) appendLine("目录名分类: ${categories.auto.joinToString(" / ")}")
             if (categories.folder.isNotEmpty()) appendLine("目录绑定分类: ${categories.folder.joinToString(" / ")}")
-            if (categories.manual.isNotEmpty()) appendLine("手动分类: ${categories.manual.joinToString(" / ")}")
         }.trim()
         status = SManga.UNKNOWN
     }
