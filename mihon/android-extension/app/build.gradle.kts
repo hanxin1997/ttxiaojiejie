@@ -12,11 +12,11 @@ android {
         applicationId = "eu.kanade.tachiyomi.extension.all.folderlibrary"
         minSdk = 21
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "1.4.1"
 
-        manifestPlaceholders["appName"] = "Mihon: Folder Library"
-        manifestPlaceholders["extClass"] = ".FolderLibrarySourceFactory"
+        manifestPlaceholders["appName"] = "Tachiyomi: Folder Library"
+        manifestPlaceholders["extClass"] = ".FolderLibrary"
         manifestPlaceholders["nsfw"] = 0
     }
 

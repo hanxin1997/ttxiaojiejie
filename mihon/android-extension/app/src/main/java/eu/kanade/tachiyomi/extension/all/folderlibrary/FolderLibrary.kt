@@ -6,22 +6,28 @@ import android.content.SharedPreferences
 import android.text.InputType
 import android.widget.Toast
 import androidx.preference.EditTextPreference
-import androidx.preference.Preference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
+import eu.kanade.tachiyomi.source.model.Filter
+import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import kotlinx.serialization.json.Json
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
+import java.util.concurrent.TimeUnit
 
 class FolderLibrary : HttpSource(), ConfigurableSource {
 
@@ -33,6 +39,12 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
     private val json = Json {
         ignoreUnknownKeys = true
         explicitNulls = false
+    }
+
+    private val stateClient: OkHttpClient by lazy {
+        client.newBuilder()
+            .callTimeout(CATEGORY_REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            .build()
     }
 
     private val configuredBaseUrl: String
@@ -62,11 +74,24 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
 
     override fun latestUpdatesParse(response: Response): MangasPage = parseSeriesList(response)
 
-    override fun searchMangaRequest(page: Int, query: String, filters: eu.kanade.tachiyomi.source.model.FilterList): Request {
-        return GET(buildSeriesUrl(query.takeIf { it.isNotBlank() }), headers)
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+        val category = filters.filterIsInstance<CategoryFilter>()
+            .firstOrNull()
+            ?.selectedCategory
+        return GET(
+            buildSeriesUrl(
+                query = query.takeIf { it.isNotBlank() },
+                category = category,
+            ),
+            headers,
+        )
     }
 
     override fun searchMangaParse(response: Response): MangasPage = parseSeriesList(response)
+
+    override fun getFilterList(): FilterList = FilterList(
+        CategoryFilter(loadKnownCategories()),
+    )
 
     override fun getMangaUrl(manga: SManga): String = baseUrl
 
@@ -74,6 +99,7 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
 
     override fun mangaDetailsParse(response: Response): SManga {
         val detail = response.parseAs<SeriesDetailDto>()
+        rememberCategories(detail.categories.effective)
         return detail.toSManga(baseUrl)
     }
 
@@ -81,6 +107,7 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val detail = response.parseAs<SeriesDetailDto>()
+        rememberCategories(detail.categories.effective)
         var chapterNumber = 1F
 
         return detail.volumes.flatMap { volume ->
@@ -123,6 +150,17 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
 
     override fun imageRequest(page: Page): Request = GET(page.imageUrl!!, headers)
 
+    private fun parseSeriesList(response: Response): MangasPage {
+        val seriesList = response.parseAs<SeriesListResponse>()
+        rememberCategories(
+            seriesList.items.flatMap { it.categories.effective },
+        )
+        return MangasPage(
+            mangas = seriesList.items.map { it.toSManga(baseUrl) },
+            hasNextPage = false,
+        )
+    }
+
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         val addressPreference = EditTextPreference(screen.context).apply {
             key = PREF_SERVER_ADDRESS
@@ -141,30 +179,26 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
                     .removeSuffix("/")
 
                 if (normalized.toHttpUrlOrNull() == null) {
-                    Toast.makeText(preference.context, "服务器地址格式无效", Toast.LENGTH_LONG).show()
+                    Toast.makeText(screen.context, "服务器地址格式无效", Toast.LENGTH_LONG).show()
                     false
                 } else {
                     preference.summary = normalized
-                    Toast.makeText(preference.context, "重启 Mihon 后生效", Toast.LENGTH_LONG).show()
+                    Toast.makeText(screen.context, "重启 Mihon 后生效", Toast.LENGTH_LONG).show()
                     true
                 }
             }
         }
 
-        val helpPreference = Preference(screen.context).apply {
-            title = "接口要求"
-            summary = "服务端需要提供 /api/series、/api/series/:id 和 /media/* 接口。"
-            isSelectable = false
-        }
-
         screen.addPreference(addressPreference)
-        screen.addPreference(helpPreference)
     }
 
-    private fun buildSeriesUrl(query: String? = null): String {
+    private fun buildSeriesUrl(query: String? = null, category: String? = null): String {
         val builder = toAbsoluteUrl("/api/series").toHttpUrl().newBuilder()
         if (!query.isNullOrBlank()) {
             builder.addQueryParameter("search", query)
+        }
+        if (!category.isNullOrBlank()) {
+            builder.addQueryParameter("category", category)
         }
         return builder.build().toString()
     }
@@ -179,6 +213,101 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
     }
 
     private inline fun <reified T> Response.parseAs(): T = json.decodeFromString(body.string())
+
+    private fun loadKnownCategories(): List<String> {
+        val cached = readCachedCategories()
+        if (hasCategoryCacheForBaseUrl() && !isCategoryCacheExpired()) {
+            return cached
+        }
+
+        val fetched = runBlocking(Dispatchers.IO) {
+            fetchKnownCategoriesFromState()
+        }
+
+        return when (fetched) {
+            null -> cached
+            else -> {
+                persistKnownCategories(fetched)
+                fetched
+            }
+        }
+    }
+
+    private fun fetchKnownCategoriesFromState(): List<String>? {
+        return try {
+            val request = GET(toAbsoluteUrl("/api/state"), headers)
+            stateClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return null
+                }
+
+                normalizeCategories(
+                    response.parseAs<StatePayloadDto>().knownCategories,
+                )
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun rememberCategories(categories: List<String>) {
+        val normalized = normalizeCategories(categories)
+        if (normalized.isEmpty()) {
+            return
+        }
+
+        val merged = normalizeCategories(readCachedCategories() + normalized)
+        persistKnownCategories(merged)
+    }
+
+    private fun readCachedCategories(): List<String> {
+        if (!hasCategoryCacheForBaseUrl()) {
+            return emptyList()
+        }
+
+        val raw = preferences.getString(PREF_CATEGORY_CACHE_VALUES, null).orEmpty()
+        if (raw.isBlank()) {
+            return emptyList()
+        }
+
+        return try {
+            normalizeCategories(json.decodeFromString<List<String>>(raw))
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun persistKnownCategories(categories: List<String>) {
+        val normalized = normalizeCategories(categories)
+        preferences.edit()
+            .putString(PREF_CATEGORY_CACHE_BASE_URL, baseUrl)
+            .putString(PREF_CATEGORY_CACHE_VALUES, json.encodeToString(normalized))
+            .putLong(PREF_CATEGORY_CACHE_FETCHED_AT, System.currentTimeMillis())
+            .apply()
+    }
+
+    private fun hasCategoryCacheForBaseUrl(): Boolean {
+        val cachedBaseUrl = preferences.getString(PREF_CATEGORY_CACHE_BASE_URL, null)
+        return cachedBaseUrl == baseUrl &&
+            preferences.contains(PREF_CATEGORY_CACHE_FETCHED_AT)
+    }
+
+    private fun isCategoryCacheExpired(): Boolean {
+        val fetchedAt = preferences.getLong(PREF_CATEGORY_CACHE_FETCHED_AT, 0L)
+        if (fetchedAt <= 0L) {
+            return true
+        }
+
+        return System.currentTimeMillis() - fetchedAt > CATEGORY_CACHE_TTL_MS
+    }
+
+    private fun normalizeCategories(categories: List<String>): List<String> {
+        return categories
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinctBy { it.lowercase() }
+            .sortedWith(String.CASE_INSENSITIVE_ORDER)
+    }
 
     private fun SeriesListItemDto.toSManga(baseUrl: String): SManga = SManga.create().apply {
         title = this@toSManga.title
@@ -241,9 +370,24 @@ class FolderLibrary : HttpSource(), ConfigurableSource {
         val chapterId: String,
     )
 
+    private class CategoryFilter(categories: List<String>) : Filter.Select<String>(
+        name = "分类",
+        values = (listOf(ALL_CATEGORIES_OPTION) + categories).toTypedArray(),
+    ) {
+        val selectedCategory: String?
+            get() = values.getOrNull(state)
+                ?.takeIf { it != ALL_CATEGORIES_OPTION }
+    }
+
     companion object {
         private const val PREF_SERVER_ADDRESS = "server_address"
+        private const val PREF_CATEGORY_CACHE_BASE_URL = "category_cache_base_url"
+        private const val PREF_CATEGORY_CACHE_VALUES = "category_cache_values"
+        private const val PREF_CATEGORY_CACHE_FETCHED_AT = "category_cache_fetched_at"
         private const val DEFAULT_SERVER_ADDRESS = "http://127.0.0.1:4321"
         private const val CHAPTER_ID_HEADER = "X-Folder-Library-Chapter-Id"
+        private const val ALL_CATEGORIES_OPTION = "全部"
+        private const val CATEGORY_REQUEST_TIMEOUT_MS = 2_000L
+        private const val CATEGORY_CACHE_TTL_MS = 10 * 60 * 1_000L
     }
 }

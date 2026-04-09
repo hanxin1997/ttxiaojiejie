@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.extension.all.folderlibrary
 
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -66,4 +65,9 @@ data class CategoriesDto(
     val folder: List<String> = emptyList(),
     val manual: List<String> = emptyList(),
     val effective: List<String> = emptyList(),
+)
+
+@Serializable
+data class StatePayloadDto(
+    val knownCategories: List<String> = emptyList(),
 )
