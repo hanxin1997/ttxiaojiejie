@@ -1,0 +1,353 @@
+/* ===== Global Reset & Base ===== */
+:root {
+  /* --- Legacy tpap tokens (kept for backward compat) --- */
+  --tpap-bg-embedded: #f8f8fa;
+  --tpap-text-secondary: #666;
+  --tpap-text-tertiary: #999;
+  --tpap-border-color: #efeff5;
+  --tpap-card-shadow: rgba(128, 128, 128, 0.2);
+  --tpap-card-active-color: #6750A4;
+  --tpap-card-active-shadow: rgba(103, 80, 164, 0.18);
+  --tpap-cover-gradient-start: rgba(100, 100, 100, 0.08);
+  --tpap-cover-gradient-end: rgba(60, 60, 60, 0.04);
+  --tpap-badge-bg: rgba(0, 0, 0, 0.6);
+  --tpap-overlay-bg: rgba(0, 0, 0, 0.45);
+  --tpap-scrollbar-thumb: rgba(128, 128, 128, 0.25);
+  --tpap-scrollbar-thumb-hover: rgba(128, 128, 128, 0.45);
+
+  /* ===== Material Design — Elevation ===== */
+  --md-elevation-0: none;
+  --md-elevation-1: 0 1px 3px 0 rgba(0, 0, 0, 0.12), 0 1px 2px -1px rgba(0, 0, 0, 0.14);
+  --md-elevation-2: 0 2px 4px -1px rgba(0, 0, 0, 0.12), 0 3px 5px 0 rgba(0, 0, 0, 0.10);
+  --md-elevation-4: 0 4px 5px 0 rgba(0, 0, 0, 0.10), 0 1px 10px 0 rgba(0, 0, 0, 0.08);
+  --md-elevation-8: 0 8px 10px -1px rgba(0, 0, 0, 0.10), 0 3px 14px 2px rgba(0, 0, 0, 0.08);
+  --md-elevation-16: 0 16px 24px 2px rgba(0, 0, 0, 0.10), 0 6px 30px 5px rgba(0, 0, 0, 0.08);
+
+  /* ===== Material Design — Color (Light) ===== */
+  --md-primary: #6750A4;
+  --md-on-primary: #FFFFFF;
+  --md-primary-container: #EADDFF;
+  --md-on-primary-container: #21005D;
+  --md-secondary: #00897B;
+  --md-on-secondary: #FFFFFF;
+  --md-secondary-container: #B2DFDB;
+  --md-on-secondary-container: #00352F;
+  --md-error: #B3261E;
+  --md-on-error: #FFFFFF;
+  --md-error-container: #F9DEDC;
+  --md-warning: #F0A020;
+  --md-success: #2E7D32;
+  --md-surface: #FFFFFF;
+  --md-surface-dim: #F5F2FA;
+  --md-surface-variant: #E7E0EC;
+  --md-on-surface: #1C1B1F;
+  --md-on-surface-variant: #49454F;
+  --md-outline: #79747E;
+  --md-outline-variant: #CAC4D0;
+  --md-background: #F6F3FB;
+  --md-inverse-surface: #313033;
+  --md-inverse-on-surface: #F4EFF4;
+
+  /* ===== Material Design — Motion ===== */
+  --md-easing-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --md-easing-decelerate: cubic-bezier(0.0, 0, 0.2, 1);
+  --md-easing-accelerate: cubic-bezier(0.4, 0, 1, 1);
+  --md-easing-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --md-duration-short: 150ms;
+  --md-duration-medium: 250ms;
+  --md-duration-long: 375ms;
+
+  /* ===== Material Design — Shape ===== */
+  --md-shape-xs: 4px;
+  --md-shape-sm: 8px;
+  --md-shape-md: 12px;
+  --md-shape-lg: 16px;
+  --md-shape-xl: 28px;
+
+  /* ===== Material Design — State Layer Opacity ===== */
+  --md-state-hover: 0.08;
+  --md-state-focus: 0.12;
+  --md-state-pressed: 0.12;
+  --md-state-dragged: 0.16;
+}
+
+/* 暗色模式 — App.vue 中 watchEffect 会在暗色主题激活时给 html 添加 .dark 类 */
+/* Material 暗色：表面色提亮代替阴影加深，Elevation 用 surface-tint 叠加 */
+html.dark {
+  /* --- Legacy tpap tokens --- */
+  --tpap-bg-embedded: #2a2a2e;
+  --tpap-text-secondary: #aaa;
+  --tpap-text-tertiary: #777;
+  --tpap-border-color: #3a3a3e;
+  --tpap-card-shadow: rgba(0, 0, 0, 0.4);
+  --tpap-card-active-shadow: rgba(103, 80, 164, 0.30);
+  --tpap-cover-gradient-start: rgba(60, 60, 60, 0.3);
+  --tpap-cover-gradient-end: rgba(40, 40, 40, 0.15);
+  --tpap-scrollbar-thumb: rgba(180, 180, 180, 0.2);
+  --tpap-scrollbar-thumb-hover: rgba(180, 180, 180, 0.35);
+
+  /* --- Material Elevation (暗色用更轻的阴影 + 表面提亮) --- */
+  --md-elevation-0: none;
+  --md-elevation-1: 0 1px 3px 0 rgba(0, 0, 0, 0.30), 0 1px 2px -1px rgba(0, 0, 0, 0.35);
+  --md-elevation-2: 0 2px 4px -1px rgba(0, 0, 0, 0.30), 0 3px 5px 0 rgba(0, 0, 0, 0.25);
+  --md-elevation-4: 0 4px 5px 0 rgba(0, 0, 0, 0.28), 0 1px 10px 0 rgba(0, 0, 0, 0.22);
+  --md-elevation-8: 0 8px 10px -1px rgba(0, 0, 0, 0.28), 0 3px 14px 2px rgba(0, 0, 0, 0.22);
+  --md-elevation-16: 0 16px 24px 2px rgba(0, 0, 0, 0.28), 0 6px 30px 5px rgba(0, 0, 0, 0.22);
+
+  /* --- Material Color (Dark) --- */
+  --md-primary: #D0BCFF;
+  --md-on-primary: #381E72;
+  --md-primary-container: #4F378B;
+  --md-on-primary-container: #EADDFF;
+  --md-secondary: #80CBC4;
+  --md-on-secondary: #003731;
+  --md-secondary-container: #005048;
+  --md-on-secondary-container: #B2DFDB;
+  --md-error: #F2B8B5;
+  --md-on-error: #601410;
+  --md-error-container: #8C1D18;
+  --md-warning: #FFD54F;
+  --md-success: #81C784;
+  --md-surface: #1C1B1F;
+  --md-surface-dim: #141316;
+  --md-surface-variant: #49454F;
+  --md-on-surface: #E6E1E5;
+  --md-on-surface-variant: #CAC4D0;
+  --md-outline: #938F99;
+  --md-outline-variant: #49454F;
+  --md-background: #1C1B1F;
+  --md-inverse-surface: #E6E1E5;
+  --md-inverse-on-surface: #313033;
+
+  /* 暗色模式下 Elevation 对应的表面提亮色（Material 3 surface tint overlay） */
+  --md-surface-1: #25232A;  /* elevation 1 */
+  --md-surface-2: #2B2930;  /* elevation 2 */
+  --md-surface-3: #312F37;  /* elevation 4 */
+  --md-surface-4: #38353E;  /* elevation 8 */
+  --md-surface-5: #3E3B45;  /* elevation 16 */
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ===== Komga-style Layout ===== */
+.app-main {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-content {
+  flex: 1;
+  padding: 24px 32px;
+  max-width: 1600px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* ===== Settings View ===== */
+.settings-view {
+  max-width: 800px;
+}
+
+/* ===== Series Grid — Komga style ===== */
+.series-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 20px;
+}
+
+/* ===== Cover Image ===== */
+.cover-shell {
+  position: relative;
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  background: linear-gradient(135deg, var(--tpap-cover-gradient-start), var(--tpap-cover-gradient-end));
+}
+
+.cover-shell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform var(--md-duration-long) var(--md-easing-standard);
+}
+
+.series-card:hover .cover-shell img {
+  transform: scale(1.05);
+}
+
+.cover-placeholder {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--n-text-color-3, var(--tpap-text-tertiary));
+  font-size: 13px;
+}
+
+/* ===== Select / Favorite overlays ===== */
+.select-indicator {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  background: var(--tpap-overlay-bg);
+  border-radius: 6px;
+  padding: 2px 4px;
+}
+
+.favorite-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  cursor: pointer;
+  background: var(--tpap-overlay-bg);
+  border-radius: 50%;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  transition: transform var(--md-duration-medium) var(--md-easing-standard);
+}
+
+.favorite-btn:hover {
+  transform: scale(1.15);
+}
+
+/* ===== Detail Cover ===== */
+.detail-cover-block {
+  aspect-ratio: 2 / 3;
+  border-radius: var(--md-shape-sm);
+  overflow: hidden;
+  background: linear-gradient(135deg, var(--tpap-cover-gradient-start), var(--tpap-cover-gradient-end));
+  position: relative;
+}
+
+.detail-cover-block img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* ===== Detail Header ===== */
+.detail-header {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+/* ===== Tag Colors ===== */
+.tag-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+/* ===== Stat Card Grid ===== */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+/* ===== Volume Stack ===== */
+.volume-stack {
+  display: grid;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+/* ===== Misc ===== */
+.inline-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+/* ===== Responsive ===== */
+@media (max-width: 1024px) {
+  .app-content {
+    padding: 20px 20px;
+  }
+
+  .series-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 16px;
+  }
+}
+
+@media (max-width: 768px) {
+  .app-content {
+    padding: 16px 12px;
+  }
+
+  .series-grid {
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 12px;
+  }
+
+  .detail-header {
+    grid-template-columns: 140px 1fr;
+    gap: 16px;
+  }
+
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .inline-grid-3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 480px) {
+  .series-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  .detail-header {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--tpap-scrollbar-thumb);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--tpap-scrollbar-thumb-hover);
+}

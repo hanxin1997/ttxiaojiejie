@@ -1,0 +1,75 @@
+/* ===== Zen-iOS Hybrid — Tactile Feedback (Pure CSS) ===== */
+/*
+ * 摒弃传统 Material Ripple 的水波纹，改为 iOS 风格的物理触感回弹。
+ * 使用方式：给可交互元素添加 class="md-ripple" (保持原类名以兼容现有代码)
+ *
+ * 注意：
+ * - 极度顺滑的贝塞尔曲线回弹反馈
+ * - Hover 时引入微妙的光学模糊
+ */
+
+.md-ripple {
+  position: relative;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 0.2s cubic-bezier(0.25, 1, 0.5, 1), box-shadow 0.2s ease !important;
+}
+
+/* 物理下压反馈 */
+.md-ripple:active {
+  transform: scale(0.96) !important;
+}
+
+/* ===== Zen-iOS — State Layer ===== */
+/*
+ * 摒弃厚重的状态层，转而使用更为清脆的高对比度微调
+ */
+
+.md-state-layer {
+  position: relative;
+  transition: transform 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* 保留叠加层作为微弱的明暗调整，而非突兀的色块覆盖 */
+.md-state-layer::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--md-state-color, #1C1C1E);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+  border-radius: inherit;
+  z-index: 1;
+}
+
+.md-state-layer:hover::before {
+  opacity: var(--md-state-hover);
+}
+
+.md-state-layer:focus-visible::before {
+  opacity: var(--md-state-focus);
+}
+
+.md-state-layer:active::before {
+  opacity: var(--md-state-pressed);
+}
+
+/* ===== Zen-iOS — Elevation & Depth Transition ===== */
+/*
+ * 使用大范围弥散阴影来呈现 Z 轴层级，赋予悬浮感
+ */
+
+.md-elevate {
+  box-shadow: 0 4px 12px -4px rgba(0,0,0,0.05);
+  transition: box-shadow 0.3s cubic-bezier(0.25, 1, 0.5, 1), transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.md-elevate:hover {
+  box-shadow: 0 6px 14px -6px rgba(0,0,0,0.12);
+  transform: translateY(-2px);
+}
+
+.md-elevate:active {
+  box-shadow: 0 12px 24px -8px rgba(0,0,0,0.08);
+  transform: translateY(0);
+}

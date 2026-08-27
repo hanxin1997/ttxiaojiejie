@@ -6,6 +6,11 @@ Thumbs.db
 
 *.log
 
-mihon/android-extension/.gradle/
-mihon/android-extension/local.properties
-mihon/android-extension/**/build/
+# Vue 构建产物（由 web/ 构建生成）
+public/
+
+# 前端开发依赖
+web/node_modules/
+web/dist/
+web/playwright-report/
+web/test-results/

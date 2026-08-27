@@ -113,18 +113,38 @@ http://localhost:4321
 
 不会再把整套章节图片复制到项目目录里。Mihon 通过扩展访问服务端时，封面和章节图片都按需从原始图库读取。
 
-Android 扩展工程位于：
+独立的 Keiyoushi 1.6 模块位于：
 
 ```text
-mihon/android-extension
+mihon/keiyoushi-module
 ```
 
-它依赖这些接口：
+模块使用 `KeiSource` suspend API，并依赖这些轻量接口：
 
-- `GET /api/series`
+- `GET /api/series?page=1&pageSize=40`
 - `GET /api/series/:id`
+- `GET /api/chapters/:id/pages`
+- `GET /api/categories`
 - `GET /media/cover/:id`
 - `GET /media/chapter/:chapterId/:pageIndex`
+
+扩展不在本仓库复制完整官方构建树。GitHub Actions 会拉取固定提交
+`5083ff5d06b9cb7736216ae0fbd0be3828bcce2c` 的 Keiyoushi 底座，覆盖模块后运行
+MockWebServer 单测并构建 APK。PR 只产生未签名 APK；受保护分支需要配置：
+
+- `MIHON_KEYSTORE_BASE64`
+- `MIHON_KEY_ALIAS`
+- `MIHON_STORE_PASSWORD`
+- `MIHON_KEY_PASSWORD`
+
+自动化入口是 `.github/workflows/build-mihon-extension.yml`。
+流水线按 Node 单测/5 万作品基准、Web typecheck/build/Playwright 性能 E2E、
+Keiyoushi 1.6 单测/APK 构建、签名检查、Docker Sharp/健康检查的顺序执行。
+其中 Web E2E 会验证 5 万作品下 DOM 上限、单次详情/章节请求、mutation 局部更新，
+以及 WebSocket 正常时无轮询。
+
+升级不迁移旧数据库、不导入旧备份，也不兼容 Mihon 1.4；服务端、Web 和 1.6
+扩展必须同步更新，数据库会在 schema 版本变化时直接重建并重新扫描。
 
 ## 前端功能
 
@@ -155,3 +175,10 @@ npm test
 - `DATA_DIR`
 - `LIBRARY_ROOT`
 - `SCAN_INTERVAL_MINUTES`
+- `RESOURCE_PROFILE=auto|lite|balanced|full`（默认 `auto`）
+- `IMAGE_CACHE_MAX_MB`（默认 `512`）
+- `IMAGE_CACHE_MAX_QUEUE`（默认 `128`）
+- `IMAGE_CACHE_TTL_HOURS`（默认 `168`，按空闲时间过期）
+- `METADATA_JOB_DEADLINE_MS`
+- `TRUST_PROXY`
+- `WS_MAX_FRAME_KB`

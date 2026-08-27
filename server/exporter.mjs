@@ -102,9 +102,10 @@ export async function syncMihonExport(librarySnapshot, exportRoot) {
 
         let pageIndex = 1;
         for (const page of chapter.pages) {
-          const ext = path.extname(page.fileName).toLowerCase() || '.jpg';
+          const sourcePath = page.sourcePath ?? path.join(chapter.sourcePath, page.relativePath);
+          const ext = path.extname(sourcePath).toLowerCase() || '.jpg';
           const targetPagePath = path.join(chapterDir, `${String(pageIndex).padStart(4, '0')}${ext}`);
-          await linkOrCopy(page.sourcePath, targetPagePath);
+          await linkOrCopy(sourcePath, targetPagePath);
           pageIndex += 1;
         }
 

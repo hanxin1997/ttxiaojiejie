@@ -1,29 +1,146 @@
-name: Build Mihon Extension
+name: Build Mihon 1.6 Extension
 
 on:
   workflow_dispatch:
   push:
     paths:
-      - "mihon/android-extension/**"
+      - "server/**"
+      - "tests/**"
+      - "benchmarks/**"
+      - "web/**"
+      - "package.json"
+      - "Dockerfile"
+      - "mihon/keiyoushi-module/**"
       - ".github/workflows/build-mihon-extension.yml"
   pull_request:
     paths:
-      - "mihon/android-extension/**"
+      - "server/**"
+      - "tests/**"
+      - "benchmarks/**"
+      - "web/**"
+      - "package.json"
+      - "Dockerfile"
+      - "mihon/keiyoushi-module/**"
       - ".github/workflows/build-mihon-extension.yml"
 
 permissions:
   contents: read
 
+env:
+  KEIYOUSHI_COMMIT: 5083ff5d06b9cb7736216ae0fbd0be3828bcce2c
+  KEIYOUSHI_MODULE: src/all/folderlibrary
+
 jobs:
-  build-apk:
+  node-tests:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: mihon/android-extension
+    timeout-minutes: 15
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Run server tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm test
+          npm run benchmark
+          npm run benchmark:scan
+
+  web-build:
+    needs: node-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Web dependencies in CI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm --prefix web install
+
+      - name: Typecheck, build, and enforce chunk budgets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm --prefix web run build
+          npm --prefix web run check:budget
+
+      - name: Run Web performance E2E
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location 'web'
+          try {
+            npx playwright install --with-deps chromium
+            npm run test:e2e
+          } finally {
+            Pop-Location
+          }
+
+  test-and-build:
+    needs: web-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
-      - name: Checkout
+      - name: Checkout project
         uses: actions/checkout@v4
+
+      - name: Checkout pinned Keiyoushi build base
+        uses: actions/checkout@v4
+        with:
+          repository: keiyoushi/extensions-source
+          ref: ${{ env.KEIYOUSHI_COMMIT }}
+          path: .keiyoushi-base
+
+      - name: Verify pinned build base
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $actual = git -C '.keiyoushi-base' rev-parse HEAD
+          if ($actual -ne $env:KEIYOUSHI_COMMIT) {
+            throw "Expected Keiyoushi $env:KEIYOUSHI_COMMIT but checked out $actual"
+          }
+
+      - name: Install Folder Library module
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $PWD ".keiyoushi-base/$env:KEIYOUSHI_MODULE"
+          New-Item -ItemType Directory -Path $target -Force | Out-Null
+
+          # 官方底座默认用 debug key 签 release。PR 必须产出无生产签名 APK，
+          # 受保护分支再由下方 apksigner 使用固定仓库 Secrets 签名。
+          $pluginPath = '.keiyoushi-base/gradle/build-logic/src/main/kotlin/ExtensionPlugin.kt'
+          $pluginText = Get-Content -LiteralPath $pluginPath -Raw -Encoding UTF8
+          $signingBlock = @'
+                      signingConfig = if (rootProject.file("signingkey.jks").exists()) {
+                          signingConfigs.getByName("release")
+                      } else {
+                          signingConfigs.getByName("debug")
+                      }
+          '@
+          if (-not $pluginText.Contains($signingBlock.Trim())) {
+            throw 'Pinned Keiyoushi signing block changed unexpectedly'
+          }
+          $pluginText = $pluginText.Replace($signingBlock.Trim(), '                    signingConfig = null')
+          Set-Content -LiteralPath $pluginPath -Value $pluginText -Encoding UTF8
+
+          # 官方 core 图标作为本地源的轻量默认图标，避免为低配模块增加额外资源。
+          Copy-Item -Path '.keiyoushi-base/core/src/main/res' -Destination (Join-Path $target 'res') -Recurse -Force
+          Copy-Item -Path 'mihon/keiyoushi-module/*' -Destination $target -Recurse -Force
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -34,22 +151,123 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Set up Gradle 8.13
+      - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.13
 
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses > /dev/null
+      - name: Install Android SDK packages
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          1..30 | ForEach-Object { 'y' } | sdkmanager --licenses | Out-Null
+          sdkmanager 'platform-tools' 'platforms;android-37' 'build-tools;37.0.0'
 
-      - name: Install SDK packages
-        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      - name: Run MockWebServer tests and unsigned release build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gradlew = Join-Path $PWD '.keiyoushi-base/gradlew'
+          & $gradlew -p '.keiyoushi-base' --no-daemon `
+            ':src:all:folderlibrary:testDebugUnitTest' `
+            ':src:all:folderlibrary:assembleRelease'
 
-      - name: Build release APK
-        run: gradle --no-daemon assembleRelease
+      - name: Collect unsigned APK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path 'artifacts' -Force | Out-Null
+          $apk = Get-ChildItem -Path '.keiyoushi-base/src/all/folderlibrary/build/outputs/apk/release' -Filter '*.apk' -File |
+            Select-Object -First 1
+          if (-not $apk) { throw 'Unsigned release APK was not produced' }
+          Copy-Item -LiteralPath $apk.FullName -Destination 'artifacts/folder-library-1.6-unsigned.apk' -Force
 
-      - name: Upload APK
+      - name: Verify unsigned APK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $apksigner = Join-Path $env:ANDROID_HOME 'build-tools/37.0.0/apksigner'
+          if (-not (Test-Path -LiteralPath $apksigner)) { throw 'apksigner was not found' }
+
+          $verification = & $apksigner verify --verbose --print-certs `
+            'artifacts/folder-library-1.6-unsigned.apk' 2>&1
+          $verificationExitCode = $LASTEXITCODE
+          if ($verificationExitCode -eq 0) {
+            throw 'PR/release staging APK was unexpectedly signed before the protected-branch step'
+          }
+          Write-Host 'Unsigned APK verification passed.'
+
+      - name: Sign protected-branch APK
+        if: github.event_name == 'push' && github.ref_protected == true
+        shell: pwsh
+        env:
+          MIHON_KEYSTORE_BASE64: ${{ secrets.MIHON_KEYSTORE_BASE64 }}
+          MIHON_KEY_ALIAS: ${{ secrets.MIHON_KEY_ALIAS }}
+          MIHON_STORE_PASSWORD: ${{ secrets.MIHON_STORE_PASSWORD }}
+          MIHON_KEY_PASSWORD: ${{ secrets.MIHON_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in @('MIHON_KEYSTORE_BASE64', 'MIHON_KEY_ALIAS', 'MIHON_STORE_PASSWORD', 'MIHON_KEY_PASSWORD')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing required signing secret: $name"
+            }
+          }
+
+          $keystore = Join-Path $env:RUNNER_TEMP 'folder-library.jks'
+          [IO.File]::WriteAllBytes($keystore, [Convert]::FromBase64String($env:MIHON_KEYSTORE_BASE64))
+          $apksigner = Join-Path $env:ANDROID_HOME 'build-tools/37.0.0/apksigner'
+          if (-not (Test-Path -LiteralPath $apksigner)) { throw 'apksigner was not found' }
+
+          & $apksigner sign `
+            --ks $keystore `
+            --ks-key-alias $env:MIHON_KEY_ALIAS `
+            --ks-pass 'env:MIHON_STORE_PASSWORD' `
+            --key-pass 'env:MIHON_KEY_PASSWORD' `
+            --out 'artifacts/folder-library-1.6-signed.apk' `
+            'artifacts/folder-library-1.6-unsigned.apk'
+          & $apksigner verify --verbose --print-certs 'artifacts/folder-library-1.6-signed.apk'
+
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: mihon-folder-library-extension-apk
-          path: mihon/android-extension/app/build/outputs/apk/release/*.apk
+          name: mihon-folder-library-1.6-apk
+          path: artifacts/*.apk
+          if-no-files-found: error
+
+  docker-smoke:
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Build production image
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          docker build --tag folder-library-ci .
+
+      - name: Verify Sharp and health/media runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          docker run --rm folder-library-ci node --input-type=module -e "await import('sharp')"
+          $container = docker run --detach --publish 4321:4321 folder-library-ci
+          try {
+            $ready = $false
+            foreach ($attempt in 1..30) {
+              try {
+                $response = Invoke-WebRequest -Uri 'http://127.0.0.1:4321/api/health/ready' -TimeoutSec 2
+                if ($response.StatusCode -eq 200) { $ready = $true; break }
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $ready) { throw 'Container readiness check did not pass' }
+
+            $metrics = Invoke-RestMethod -Uri 'http://127.0.0.1:4321/api/metrics' -TimeoutSec 5
+            if (-not $metrics.database) { throw 'Database metrics are missing' }
+          } finally {
+            docker logs $container
+            docker rm --force $container | Out-Null
+          }

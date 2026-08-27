@@ -4,3 +4,8 @@ library
 mihon
 .git
 .DS_Store
+web/node_modules
+web/.vite
+public
+komga-master
+_tmp_mihon_upstream
