@@ -54,17 +54,18 @@ jobs:
           # 受保护分支再由下方 apksigner 使用固定仓库 Secrets 签名。
           $pluginPath = '.keiyoushi-base/gradle/build-logic/src/main/kotlin/ExtensionPlugin.kt'
           $pluginText = Get-Content -LiteralPath $pluginPath -Raw -Encoding UTF8
+          # 缩进必须和固定 commit 的原文逐字节一致：底座一改就该报错，而不是静默跳过替换。
           $signingBlock = @'
-                      signingConfig = if (rootProject.file("signingkey.jks").exists()) {
-                          signingConfigs.getByName("release")
-                      } else {
-                          signingConfigs.getByName("debug")
-                      }
+                              signingConfig = if (rootProject.file("signingkey.jks").exists()) {
+                                  signingConfigs.getByName("release")
+                              } else {
+                                  signingConfigs.getByName("debug")
+                              }
           '@
-          if (-not $pluginText.Contains($signingBlock.Trim())) {
+          if (-not $pluginText.Contains($signingBlock)) {
             throw 'Pinned Keiyoushi signing block changed unexpectedly'
           }
-          $pluginText = $pluginText.Replace($signingBlock.Trim(), '                    signingConfig = null')
+          $pluginText = $pluginText.Replace($signingBlock, '                    signingConfig = null')
           Set-Content -LiteralPath $pluginPath -Value $pluginText -Encoding UTF8
 
           # 官方 core 图标作为本地源的轻量默认图标，避免为低配模块增加额外资源。
