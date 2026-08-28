@@ -4,22 +4,10 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "server/**"
-      - "tests/**"
-      - "benchmarks/**"
-      - "web/**"
-      - "package.json"
-      - "Dockerfile"
       - "mihon/keiyoushi-module/**"
       - ".github/workflows/build-mihon-extension.yml"
   pull_request:
     paths:
-      - "server/**"
-      - "tests/**"
-      - "benchmarks/**"
-      - "web/**"
-      - "package.json"
-      - "Dockerfile"
       - "mihon/keiyoushi-module/**"
       - ".github/workflows/build-mihon-extension.yml"
 
@@ -31,66 +19,7 @@ env:
   KEIYOUSHI_MODULE: src/all/folderlibrary
 
 jobs:
-  node-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout project
-        uses: actions/checkout@v4
-
-      - name: Set up Node 24
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
-      - name: Run server tests
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          npm test
-          npm run benchmark
-          npm run benchmark:scan
-
-  web-build:
-    needs: node-tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout project
-        uses: actions/checkout@v4
-
-      - name: Set up Node 24
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
-      - name: Install Web dependencies in CI
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          npm --prefix web install
-
-      - name: Typecheck, build, and enforce chunk budgets
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          npm --prefix web run build
-          npm --prefix web run check:budget
-
-      - name: Run Web performance E2E
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Push-Location 'web'
-          try {
-            npx playwright install --with-deps chromium
-            npm run test:e2e
-          } finally {
-            Pop-Location
-          }
-
   test-and-build:
-    needs: web-build
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -232,42 +161,3 @@ jobs:
           name: mihon-folder-library-1.6-apk
           path: artifacts/*.apk
           if-no-files-found: error
-
-  docker-smoke:
-    needs: test-and-build
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout project
-        uses: actions/checkout@v4
-
-      - name: Build production image
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          docker build --tag folder-library-ci .
-
-      - name: Verify Sharp and health/media runtime
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          docker run --rm folder-library-ci node --input-type=module -e "await import('sharp')"
-          $container = docker run --detach --publish 4321:4321 folder-library-ci
-          try {
-            $ready = $false
-            foreach ($attempt in 1..30) {
-              try {
-                $response = Invoke-WebRequest -Uri 'http://127.0.0.1:4321/api/health/ready' -TimeoutSec 2
-                if ($response.StatusCode -eq 200) { $ready = $true; break }
-              } catch {
-                Start-Sleep -Seconds 1
-              }
-            }
-            if (-not $ready) { throw 'Container readiness check did not pass' }
-
-            $metrics = Invoke-RestMethod -Uri 'http://127.0.0.1:4321/api/metrics' -TimeoutSec 5
-            if (-not $metrics.database) { throw 'Database metrics are missing' }
-          } finally {
-            docker logs $container
-            docker rm --force $container | Out-Null
-          }

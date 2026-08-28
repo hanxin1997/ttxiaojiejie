@@ -200,7 +200,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch, type CSSProperties } from 'vue'
 import {
   NButton,
   NButtonGroup,
@@ -369,7 +369,7 @@ const visibleSeries = computed(() => {
   return state.series.slice(visibleRange.value.startIndex, visibleRange.value.endIndex)
 })
 
-const gridStyle = computed(() => ({
+const gridStyle = computed<CSSProperties>(() => ({
   position: 'absolute',
   top: `${visibleRange.value.startRow * rowHeight.value}px`,
   left: '0',

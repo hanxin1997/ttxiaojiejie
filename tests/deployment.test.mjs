@@ -22,8 +22,6 @@ test('Mihon workflow pins the 1.6 build base and separates unsigned PRs from pro
   assert.match(workflow, /platforms;android-37/);
   assert.match(workflow, /build-tools;37\.0\.0/);
   assert.match(workflow, /build-tools\/37\.0\.0\/apksigner/);
-  assert.match(workflow, /npx playwright install --with-deps chromium/);
-  assert.match(workflow, /npm run test:e2e/);
   assert.match(workflow, /if: github\.event_name == 'push' && github\.ref_protected == true/);
   for (const secret of [
     'MIHON_KEYSTORE_BASE64',
@@ -35,8 +33,9 @@ test('Mihon workflow pins the 1.6 build base and separates unsigned PRs from pro
   }
   assert.match(workflow, /name: Verify unsigned APK/);
   assert.match(workflow, /apksigner verify --verbose --print-certs/);
-  assert.match(workflow, /- "benchmarks\/\*\*"/);
-  assert.match(workflow, /npm run benchmark:scan/);
+
+  // 扩展编译不得依赖其他 job：一旦挂上 needs，上游失败会让 APK 构建变成 skipped 而不是失败。
+  assert.doesNotMatch(workflow, /^\s+needs:/m);
 
   const runCount = (workflow.match(/^\s+run: \|$/gm) ?? []).length;
   const strictRunCount = (

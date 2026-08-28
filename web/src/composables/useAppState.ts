@@ -1,4 +1,4 @@
-import { reactive, readonly, type DeepReadonly } from 'vue'
+import { reactive, readonly } from 'vue'
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
 import type {
   AppState,
@@ -433,6 +433,13 @@ async function loadDuplicates() {
   state.duplicateGroups = result.groups
 }
 
+/** 从重复分组里移除一项；只剩一项的分组不再构成重复，一并丢弃。 */
+function removeDuplicateItem(itemId: string) {
+  state.duplicateGroups = state.duplicateGroups
+    .map((group) => ({ ...group, items: group.items.filter((item) => item.id !== itemId) }))
+    .filter((group) => group.items.length >= 2)
+}
+
 async function loadWatcherStatus() {
   state.watcherStatus = await api.getWatcherStatus()
 }
@@ -540,7 +547,9 @@ async function syncRouteState(route: Pick<RouteLocationNormalizedLoaded, 'name' 
 
 export function useAppState() {
   return {
-    state: readonly(state) as DeepReadonly<State>,
+    // 运行时 readonly() 代理是深层的，仍会拦截任何嵌套写入；
+    // 类型只标浅层 Readonly，因为 Vue SFC 编译器无法在 defineProps 里解析 DeepReadonly。
+    state: readonly(state) as Readonly<State>,
     refreshAll,
     loadSeriesList,
     loadSeriesDetail,
@@ -576,6 +585,7 @@ export function useAppState() {
     saveReadProgress,
     batchSetCategories,
     loadDuplicates,
+    removeDuplicateItem,
     loadWatcherStatus,
     restartWatcher,
     setWatcherStatus,

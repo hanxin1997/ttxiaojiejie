@@ -181,12 +181,20 @@ import {
   NText,
   useMessage,
 } from 'naive-ui'
-import type { DuplicateItem, DuplicateGroup, MetadataScrapeItem } from '../api'
+import type { DuplicateItem, MetadataScrapeItem } from '../api'
 import { api } from '../api'
 import { useAppState } from '../composables/useAppState'
 import { formatBytes } from '../utils/format'
 
-const { state, loadDuplicates, loadWatcherStatus, refreshAll, restartWatcher, restoreActiveDetail } = useAppState()
+const {
+  state,
+  loadDuplicates,
+  removeDuplicateItem,
+  loadWatcherStatus,
+  refreshAll,
+  restartWatcher,
+  restoreActiveDetail,
+} = useAppState()
 const message = useMessage()
 
 const loadingDuplicates = ref(false)
@@ -214,7 +222,7 @@ function getCoverUrl(item: DuplicateItem) {
 /**
  * 路径差异高亮：找出同组中各项路径的不同部分
  */
-function highlightPathDiff(items: DuplicateItem[], current: DuplicateItem) {
+function highlightPathDiff(items: readonly DuplicateItem[], current: DuplicateItem) {
   if (items.length < 2) {
     return [{ text: current.sourceKey, diff: false }]
   }
@@ -273,25 +281,10 @@ function handleKeepItem(item: DuplicateItem) {
   }
 }
 
-async function handleDeleteItem(item: DuplicateItem) {
-  try {
-    // 调用后端删除（如果有删除 API）
-    // 目前从 UI 中移除该项
-    for (const group of state.duplicateGroups) {
-      const idx = group.items.findIndex((i) => i.id === item.id)
-      if (idx >= 0) {
-        group.items.splice(idx, 1)
-        break
-      }
-    }
-    // 清理空组
-    const nonEmpty = state.duplicateGroups.filter((g) => g.items.length >= 2)
-    state.duplicateGroups.length = 0
-    state.duplicateGroups.push(...nonEmpty)
-    message.success(`已移除「${item.title}」`)
-  } catch (error: any) {
-    message.error(error?.message || '删除失败')
-  }
+function handleDeleteItem(item: DuplicateItem) {
+  // 后端没有删除文件的接口，这里只把该项从重复分组里摘掉。
+  removeDuplicateItem(item.id)
+  message.success(`已移除「${item.title}」`)
 }
 
 async function handleLoadDuplicates() {
