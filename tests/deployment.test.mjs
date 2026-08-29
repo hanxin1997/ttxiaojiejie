@@ -56,6 +56,12 @@ test('Mihon workflow pins the 1.6 build base and separates unsigned PRs from pro
     workflow,
     /\$report\.Substring\(0, \[Math\]::Min\(40000, \$report\.Length\)\)/,
   );
+
+  // 4096 字符的预算不能被单个用例的协程栈吃光：按 XML 结构逐用例提取，只留自家栈帧。
+  assert.match(workflow, /function Get-TestFailureSummary/);
+  assert.doesNotMatch(workflow, /Select-String -Pattern '<\(failure\|error\)/);
+  assert.match(workflow, /\$_ -match \'\^\\s\*at \.\*folderlibrary\'/);
+  assert.match(workflow, /\$budget = 4000 - \$failures\.Length/);
 });
 
 test('Mihon JVM tests include the runtime dependencies that official modules compileOnly', async () => {
