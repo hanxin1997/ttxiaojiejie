@@ -119,7 +119,7 @@ jobs:
           Write-Host "::warning title=Spotless violations (fix these in mihon/keiyoushi-module)::$escaped"
           exit 0
 
-      - name: Run MockWebServer tests and unsigned release build
+      - name: Run MockWebServer tests and release build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -162,15 +162,15 @@ jobs:
           Write-Host "::error title=Gradle test/build failure::$escaped"
           exit 1
 
-      - name: Collect unsigned APK
+      - name: Collect staging APK
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Path 'artifacts' -Force | Out-Null
           $apk = Get-ChildItem -Path '.keiyoushi-base/src/all/folderlibrary/build/outputs/apk/release' -Filter '*.apk' -File |
             Select-Object -First 1
-          if (-not $apk) { throw 'Unsigned release APK was not produced' }
-          Copy-Item -LiteralPath $apk.FullName -Destination 'artifacts/folder-library-1.6-unsigned.apk' -Force
+          if (-not $apk) { throw 'Release APK was not produced' }
+          Copy-Item -LiteralPath $apk.FullName -Destination 'artifacts/folder-library-1.6-staging.apk' -Force
 
       - name: Resolve apksigner
         shell: pwsh
@@ -190,18 +190,36 @@ jobs:
           Write-Host "Using apksigner: $apksigner"
           "APKSIGNER=$apksigner" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Verify unsigned APK
+      - name: Verify staging APK carries only the debug certificate
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
+          # 底座给 release 变体永远配签名：有 signingkey.jks 用它，没有就回落到 AGP 的 debug
+          # keystore（ExtensionPlugin.kt 的 buildTypes.release）。所以"暂存产物应当未签名"是
+          # 错的前提——它一定是签过的。真正要守的是：生产密钥不能出现在非受保护分支的产物里。
           $verification = & $env:APKSIGNER verify --verbose --print-certs `
-            'artifacts/folder-library-1.6-unsigned.apk' 2>&1
+            'artifacts/folder-library-1.6-staging.apk' 2>&1 | Out-String
           $verificationExitCode = $LASTEXITCODE
-          if ($verificationExitCode -eq 0) {
-            throw 'PR/release staging APK was unexpectedly signed before the protected-branch step'
+          Write-Host $verification
+
+          # DN 由 AGP 写死（KeystoreHelper.CERTIFICATE_DESC），不需要配置任何指纹。
+          $isDebugCert = $verification -match 'CN=Android Debug'
+          if ($verificationExitCode -eq 0 -and $isDebugCert) {
+            Write-Host 'Staging APK is debug-signed as expected.'
+            exit 0
           }
-          Write-Host 'Unsigned APK verification passed.'
+
+          $reason = if ($verificationExitCode -ne 0) {
+            "apksigner verify exited $verificationExitCode"
+          } else {
+            'staging APK is signed by a non-debug certificate — the production key must not reach this step'
+          }
+          $report = "$reason`n$verification"
+          $escaped = $report.Substring([Math]::Max(0, $report.Length - 4000)).
+            Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+          Write-Host "::error title=Staging APK signature check failed::$escaped"
+          exit 1
 
       - name: Sign protected-branch APK
         if: github.event_name == 'push' && github.ref_protected == true
@@ -228,7 +246,7 @@ jobs:
             --ks-pass 'env:MIHON_STORE_PASSWORD' `
             --key-pass 'env:MIHON_KEY_PASSWORD' `
             --out 'artifacts/folder-library-1.6-signed.apk' `
-            'artifacts/folder-library-1.6-unsigned.apk'
+            'artifacts/folder-library-1.6-staging.apk'
           & $env:APKSIGNER verify --verbose --print-certs 'artifacts/folder-library-1.6-signed.apk'
 
       - name: Upload APKs

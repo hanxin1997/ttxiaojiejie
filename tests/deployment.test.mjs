@@ -33,8 +33,15 @@ test('Mihon workflow pins the 1.6 build base and separates unsigned PRs from pro
   ]) {
     assert.match(workflow, new RegExp(`secrets\\.${secret}`));
   }
-  assert.match(workflow, /name: Verify unsigned APK/);
+  assert.match(workflow, /name: Verify staging APK carries only the debug certificate/);
   assert.match(workflow, /\$env:APKSIGNER verify --verbose --print-certs/);
+
+  // 底座给 release 变体永远配签名（无 signingkey.jks 则回落 debug keystore），所以断言
+  // "暂存产物未签名"必然失败。要守的是生产密钥不外泄，比对 AGP 写死的 debug DN 即可。
+  assert.doesNotMatch(workflow, /unexpectedly signed/);
+  assert.doesNotMatch(workflow, /folder-library-1\.6-unsigned\.apk/);
+  assert.match(workflow, /\$isDebugCert = \$verification -match 'CN=Android Debug'/);
+  assert.match(workflow, /\$verificationExitCode -eq 0 -and \$isDebugCert/);
 
   // 扩展编译不得依赖其他 job：一旦挂上 needs，上游失败会让 APK 构建变成 skipped 而不是失败。
   assert.doesNotMatch(workflow, /^\s+needs:/m);
