@@ -95,6 +95,27 @@ test('Mihon list conversion avoids a prohibited member-extension callable refere
   assert.match(source, /items\.map\s*\{\s*item\s*->\s*item\.toSManga\(\)\s*\}/);
 });
 
+test('Mihon API requests stay off the stubbed host helpers so JVM tests can run', async () => {
+  const source = await fs.readFile(
+    new URL(
+      '../mihon/keiyoushi-module/src/eu/kanade/tachiyomi/extension/all/folderlibrary/FolderLibraryApi.kt',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+
+  // extensions-lib 是桩：await()/awaitSuccess() 就是 throw Exception("Stub!")，
+  // jsonInstance 是 Injekt.get()。两条路都只有 Mihon 进程里有实现，JVM 测试必挂。
+  assert.doesNotMatch(source, /^import keiyoushi\./m);
+  assert.match(source, /private val json = Json \{ ignoreUnknownKeys = true \}/);
+
+  // 读 body 必须在挂起状态里完成，取消才能立刻拆 socket；resume 后再阻塞读就晚了。
+  assert.match(source, /suspendCancellableCoroutine \{ continuation ->/);
+  assert.match(source, /continuation\.invokeOnCancellation \{ call\.cancel\(\) \}/);
+  assert.match(source, /call\.enqueue\(ParseOnResponse\(continuation, deserializer\)\)/);
+  assert.match(source, /response\.use \{ json\.decodeFromBufferedSource\(deserializer, it\.body\.source\(\)\) \}/);
+});
+
 test('Web refresh coordinator checks lightweight revision before reloading catalog data', async () => {
   const source = await fs.readFile(
     new URL('../web/src/composables/useAppState.ts', import.meta.url),
