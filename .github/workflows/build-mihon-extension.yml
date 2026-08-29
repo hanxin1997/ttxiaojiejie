@@ -123,10 +123,29 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
           $gradlew = Join-Path $PWD '.keiyoushi-base/gradlew'
-          & $gradlew -p '.keiyoushi-base' --no-daemon `
+          $log = & $gradlew -p '.keiyoushi-base' --no-daemon `
             ':src:all:folderlibrary:testDebugUnitTest' `
-            ':src:all:folderlibrary:assembleRelease'
+            ':src:all:folderlibrary:assembleRelease' 2>&1 | Out-String
+          Write-Host $log
+          if ($LASTEXITCODE -eq 0) { exit 0 }
+
+          # job log 匿名不可读，失败详情只能走 annotation 带出来。
+          $results = ".keiyoushi-base/$env:KEIYOUSHI_MODULE/build/test-results"
+          $failures = ''
+          if (Test-Path -LiteralPath $results) {
+            $failures = Get-ChildItem -LiteralPath $results -Filter '*.xml' -Recurse |
+              Select-String -Pattern '<(failure|error)\b' -Context 0, 25 |
+              Out-String
+          }
+
+          $report = $log.Substring([Math]::Max(0, $log.Length - 20000)) +
+            "`n=== test failures ===`n" + $failures
+          $escaped = $report.Substring(0, [Math]::Min(40000, $report.Length)).
+            Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+          Write-Host "::error title=Gradle test/build failure::$escaped"
+          exit 1
 
       - name: Collect unsigned APK
         shell: pwsh
