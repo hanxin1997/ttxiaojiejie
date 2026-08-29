@@ -19,9 +19,11 @@ test('Mihon workflow pins the 1.6 build base and separates unsigned PRs from pro
   assert.match(workflow, /KEIYOUSHI_COMMIT: 5083ff5d06b9cb7736216ae0fbd0be3828bcce2c/);
   assert.match(workflow, /:src:all:folderlibrary:testDebugUnitTest/);
   assert.match(workflow, /:src:all:folderlibrary:assembleRelease/);
-  assert.match(workflow, /platforms;android-37/);
-  assert.match(workflow, /build-tools;37\.0\.0/);
-  assert.match(workflow, /build-tools\/37\.0\.0\/apksigner/);
+  // SDK 组件交给 AGP 按底座的 compileSdk 自己下载：workflow 里再写死版本号，
+  // 底座一升级就会去装不存在的包（platforms;android-37 就是这么炸的）。
+  assert.doesNotMatch(workflow, /sdkmanager/);
+  assert.doesNotMatch(workflow, /build-tools[;/]\d/);
+  assert.match(workflow, /"APKSIGNER=\$apksigner"/);
   assert.match(workflow, /if: github\.event_name == 'push' && github\.ref_protected == true/);
   for (const secret of [
     'MIHON_KEYSTORE_BASE64',
@@ -32,7 +34,7 @@ test('Mihon workflow pins the 1.6 build base and separates unsigned PRs from pro
     assert.match(workflow, new RegExp(`secrets\\.${secret}`));
   }
   assert.match(workflow, /name: Verify unsigned APK/);
-  assert.match(workflow, /apksigner verify --verbose --print-certs/);
+  assert.match(workflow, /\$env:APKSIGNER verify --verbose --print-certs/);
 
   // 扩展编译不得依赖其他 job：一旦挂上 needs，上游失败会让 APK 构建变成 skipped 而不是失败。
   assert.doesNotMatch(workflow, /^\s+needs:/m);

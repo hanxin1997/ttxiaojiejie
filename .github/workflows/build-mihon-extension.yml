@@ -84,13 +84,6 @@ jobs:
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Install Android SDK packages
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          1..30 | ForEach-Object { 'y' } | sdkmanager --licenses | Out-Null
-          sdkmanager 'platform-tools' 'platforms;android-37' 'build-tools;37.0.0'
-
       - name: Run MockWebServer tests and unsigned release build
         shell: pwsh
         run: |
@@ -110,15 +103,30 @@ jobs:
           if (-not $apk) { throw 'Unsigned release APK was not produced' }
           Copy-Item -LiteralPath $apk.FullName -Destination 'artifacts/folder-library-1.6-unsigned.apk' -Force
 
+      - name: Resolve apksigner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 不手动装 SDK：AGP 会按底座的 compileSdk 自己下载平台和 build-tools，
+          # 版本号写死在这里只会在底座升级时炸掉。挑装好的最高版即可。
+          $buildToolsRoot = Join-Path $env:ANDROID_HOME 'build-tools'
+          $installed = Get-ChildItem -LiteralPath $buildToolsRoot -Directory |
+            Where-Object {
+              $_.Name -match '^\d+\.\d+\.\d+' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'apksigner'))
+            } |
+            Sort-Object -Property @{ Expression = { [version][regex]::Match($_.Name, '^\d+\.\d+\.\d+').Value } } -Descending
+          if (-not $installed) { throw "No build-tools under $buildToolsRoot provides apksigner" }
+
+          $apksigner = Join-Path $installed[0].FullName 'apksigner'
+          Write-Host "Using apksigner: $apksigner"
+          "APKSIGNER=$apksigner" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Verify unsigned APK
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          $apksigner = Join-Path $env:ANDROID_HOME 'build-tools/37.0.0/apksigner'
-          if (-not (Test-Path -LiteralPath $apksigner)) { throw 'apksigner was not found' }
-
-          $verification = & $apksigner verify --verbose --print-certs `
+          $verification = & $env:APKSIGNER verify --verbose --print-certs `
             'artifacts/folder-library-1.6-unsigned.apk' 2>&1
           $verificationExitCode = $LASTEXITCODE
           if ($verificationExitCode -eq 0) {
@@ -144,17 +152,15 @@ jobs:
 
           $keystore = Join-Path $env:RUNNER_TEMP 'folder-library.jks'
           [IO.File]::WriteAllBytes($keystore, [Convert]::FromBase64String($env:MIHON_KEYSTORE_BASE64))
-          $apksigner = Join-Path $env:ANDROID_HOME 'build-tools/37.0.0/apksigner'
-          if (-not (Test-Path -LiteralPath $apksigner)) { throw 'apksigner was not found' }
 
-          & $apksigner sign `
+          & $env:APKSIGNER sign `
             --ks $keystore `
             --ks-key-alias $env:MIHON_KEY_ALIAS `
             --ks-pass 'env:MIHON_STORE_PASSWORD' `
             --key-pass 'env:MIHON_KEY_PASSWORD' `
             --out 'artifacts/folder-library-1.6-signed.apk' `
             'artifacts/folder-library-1.6-unsigned.apk'
-          & $apksigner verify --verbose --print-certs 'artifacts/folder-library-1.6-signed.apk'
+          & $env:APKSIGNER verify --verbose --print-certs 'artifacts/folder-library-1.6-signed.apk'
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
