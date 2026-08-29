@@ -66,6 +66,13 @@ test('Mihon JVM tests include the runtime dependencies that official modules com
 
   assert.match(buildScript, /testImplementation\(libs\.bundles\.common\)/);
   assert.match(buildScript, /testImplementation\(libs\.tachiyomi\.lib\.v16\)/);
+
+  // 底座对每个编译单元都跑 SourceProcessor 并全局传 kei_sources，而 test/ 里结构上不可能有
+  // @Source，KSP 会硬报错。这个模块是唯一带 test 源集的扩展，所以必须自己停掉测试端 KSP。
+  assert.match(
+    buildScript,
+    /tasks\.matching \{ it\.name\.startsWith\("ksp"\) && it\.name\.contains\("UnitTest"\) \}/,
+  );
 });
 
 test('Mihon list conversion avoids a prohibited member-extension callable reference', async () => {
