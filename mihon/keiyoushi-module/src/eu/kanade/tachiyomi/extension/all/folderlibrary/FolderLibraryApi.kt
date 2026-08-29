@@ -35,14 +35,11 @@ internal class FolderLibraryApi(
         return client.get(url, headers, CacheControl.FORCE_NETWORK).parseAs()
     }
 
-    suspend fun detail(seriesId: String): SeriesDetailDto =
-        client.get(absoluteUrl("/api/series/$seriesId"), headers, CacheControl.FORCE_NETWORK).parseAs()
+    suspend fun detail(seriesId: String): SeriesDetailDto = client.get(absoluteUrl("/api/series/$seriesId"), headers, CacheControl.FORCE_NETWORK).parseAs()
 
-    suspend fun chapterPages(chapterId: String): ChapterPagesDto =
-        client.get(absoluteUrl("/api/chapters/$chapterId/pages"), headers, CacheControl.FORCE_NETWORK).parseAs()
+    suspend fun chapterPages(chapterId: String): ChapterPagesDto = client.get(absoluteUrl("/api/chapters/$chapterId/pages"), headers, CacheControl.FORCE_NETWORK).parseAs()
 
-    suspend fun categories(): CategoriesResponse =
-        client.get(absoluteUrl("/api/categories"), headers, CacheControl.FORCE_NETWORK).parseAs()
+    suspend fun categories(): CategoriesResponse = client.get(absoluteUrl("/api/categories"), headers, CacheControl.FORCE_NETWORK).parseAs()
 
     fun pageImageUrls(payload: ChapterPagesDto, readingMode: String, mono: Boolean): List<String> {
         val variant = resolveVariant(readingMode, mono)

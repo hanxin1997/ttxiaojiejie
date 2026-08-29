@@ -58,11 +58,9 @@ abstract class FolderLibrary :
         )
     }
 
-    override suspend fun getPopularManga(page: Int): MangasPage =
-        api.series(page = page).toMangasPage()
+    override suspend fun getPopularManga(page: Int): MangasPage = api.series(page = page).toMangasPage()
 
-    override suspend fun getLatestUpdates(page: Int): MangasPage =
-        api.series(page = page, sort = "updatedAt", order = "desc").toMangasPage()
+    override suspend fun getLatestUpdates(page: Int): MangasPage = api.series(page = page, sort = "updatedAt", order = "desc").toMangasPage()
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val category = filters.firstInstanceOrNull<CategoryFilter>()?.selectedCategory
@@ -258,10 +256,11 @@ abstract class FolderLibrary :
         .distinctBy { it.lowercase() }
         .sortedWith(String.CASE_INSENSITIVE_ORDER)
 
-    private class CategoryFilter(categories: List<String>) : Filter.Select<String>(
-        name = "分类",
-        values = (listOf(ALL_CATEGORIES) + categories).toTypedArray(),
-    ) {
+    private class CategoryFilter(categories: List<String>) :
+        Filter.Select<String>(
+            name = "分类",
+            values = (listOf(ALL_CATEGORIES) + categories).toTypedArray(),
+        ) {
         val selectedCategory: String?
             get() = values.getOrNull(state)?.takeUnless { it == ALL_CATEGORIES }
     }
