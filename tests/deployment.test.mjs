@@ -57,6 +57,20 @@ test('Mihon JVM tests include the runtime dependencies that official modules com
   assert.match(buildScript, /testImplementation\(libs\.tachiyomi\.lib\.v16\)/);
 });
 
+test('Mihon list conversion avoids a prohibited member-extension callable reference', async () => {
+  const source = await fs.readFile(
+    new URL(
+      '../mihon/keiyoushi-module/src/eu/kanade/tachiyomi/extension/all/folderlibrary/FolderLibrary.kt',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+
+  // Kotlin cannot create a callable reference to an extension function declared as a class member.
+  assert.doesNotMatch(source, /\bSeriesListItemDto::toSManga\b/);
+  assert.match(source, /items\.map\s*\{\s*item\s*->\s*item\.toSManga\(\)\s*\}/);
+});
+
 test('Web refresh coordinator checks lightweight revision before reloading catalog data', async () => {
   const source = await fs.readFile(
     new URL('../web/src/composables/useAppState.ts', import.meta.url),

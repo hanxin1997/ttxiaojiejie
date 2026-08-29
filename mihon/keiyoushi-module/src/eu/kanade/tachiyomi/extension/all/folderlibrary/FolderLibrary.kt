@@ -133,7 +133,8 @@ abstract class FolderLibrary :
     private fun SeriesListResponse.toMangasPage(): MangasPage {
         rememberCategories(items.flatMap { it.categories.effective })
         return MangasPage(
-            mangas = items.map(SeriesListItemDto::toSManga),
+            // 成员扩展函数不能作为 callable reference；在类的 dispatch receiver 内直接调用。
+            mangas = items.map { item -> item.toSManga() },
             hasNextPage = page < totalPages,
         )
     }
