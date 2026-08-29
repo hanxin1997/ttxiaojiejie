@@ -113,8 +113,8 @@ jobs:
           $report = "=== spotlessCheck ===`n$violations`n=== patch ===`n$patch"
           Write-Host $report
 
-          # annotation 单条上限约 64KB，留足余量；换行按 workflow command 规则转义。
-          $escaped = $report.Substring(0, [Math]::Min(40000, $report.Length)).
+          # 匿名 Checks API 只暴露 annotation 的前 4096 个解码字符；保留包含补丁的日志尾部。
+          $escaped = $report.Substring([Math]::Max(0, $report.Length - 4000)).
             Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
           Write-Host "::warning title=Spotless violations (fix these in mihon/keiyoushi-module)::$escaped"
           exit 0
@@ -142,7 +142,8 @@ jobs:
 
           $report = $log.Substring([Math]::Max(0, $log.Length - 20000)) +
             "`n=== test failures ===`n" + $failures
-          $escaped = $report.Substring(0, [Math]::Min(40000, $report.Length)).
+          # 编译器与测试框架都在输出末尾给出可执行诊断；控制在 Checks API 可见范围内。
+          $escaped = $report.Substring([Math]::Max(0, $report.Length - 4000)).
             Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
           Write-Host "::error title=Gradle test/build failure::$escaped"
           exit 1

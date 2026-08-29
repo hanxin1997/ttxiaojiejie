@@ -45,6 +45,17 @@ test('Mihon workflow pins the 1.6 build base and separates unsigned PRs from pro
   ).length;
   assert.ok(runCount > 0);
   assert.equal(strictRunCount, runCount);
+
+  // GitHub check annotations expose only 4096 decoded characters. Preserve the log tail,
+  // where Gradle and Kotlin print the actionable failure, instead of the task-list prefix.
+  assert.match(
+    workflow,
+    /\$report\.Substring\(\[Math\]::Max\(0, \$report\.Length - 4000\)\)/,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /\$report\.Substring\(0, \[Math\]::Min\(40000, \$report\.Length\)\)/,
+  );
 });
 
 test('Mihon JVM tests include the runtime dependencies that official modules compileOnly', async () => {
