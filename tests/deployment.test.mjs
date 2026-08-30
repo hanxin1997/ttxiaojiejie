@@ -19,6 +19,11 @@ test('Mihon workflow pins the 1.6 build base and separates unsigned PRs from pro
   assert.match(workflow, /KEIYOUSHI_COMMIT: 5083ff5d06b9cb7736216ae0fbd0be3828bcce2c/);
   assert.match(workflow, /:src:all:folderlibrary:testDebugUnitTest/);
   assert.match(workflow, /:src:all:folderlibrary:assembleRelease/);
+
+  // spotless 插件只把 spotlessCheck 挂到 check 上，这里跑的两个任务都不经过 check，
+  // 不显式列出就等于不检查格式。也不能在 CI 里 spotlessApply——那会掩盖源码是否干净。
+  assert.match(workflow, /:src:all:folderlibrary:spotlessCheck/);
+  assert.doesNotMatch(workflow, /spotlessApply/);
   // SDK 组件交给 AGP 按底座的 compileSdk 自己下载：workflow 里再写死版本号，
   // 底座一升级就会去装不存在的包（platforms;android-37 就是这么炸的）。
   assert.doesNotMatch(workflow, /sdkmanager/);

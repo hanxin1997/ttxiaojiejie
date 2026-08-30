@@ -84,48 +84,17 @@ jobs:
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Report and apply Spotless formatting
+      - name: Run Spotless, MockWebServer tests and release build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          # 本仓库没有 JDK，ktlint 只能在 runner 上跑。把违规详情和补丁提到 annotation 里
-          # （匿名可读，job log 不可读），这样源码能在本仓库一次改对，而不是靠 CI 试错。
-          $gradlew = Join-Path $PWD '.keiyoushi-base/gradlew'
-          $module = ".keiyoushi-base/$env:KEIYOUSHI_MODULE"
-          $before = Join-Path $env:RUNNER_TEMP 'spotless-before'
-          Copy-Item -LiteralPath $module -Destination $before -Recurse -Force
-
-          $violations = & $gradlew -p '.keiyoushi-base' --no-daemon `
-            ":$($env:KEIYOUSHI_MODULE -replace '/', ':'):spotlessCheck" 2>&1 | Out-String
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host 'Spotless already clean; nothing to apply.'
-            exit 0
-          }
-
-          & $gradlew -p '.keiyoushi-base' --no-daemon `
-            ":$($env:KEIYOUSHI_MODULE -replace '/', ':'):spotlessApply"
-          if ($LASTEXITCODE -ne 0) { throw 'spotlessApply failed' }
-
-          # git diff 有差异时退出码为 1，不能让它把整个 step 判失败：
-          # 这一步只负责报告，构建成败由后面的 test/assemble 决定。
-          $patch = & git diff --no-index --no-color -- $before $module 2>&1 | Out-String
-          $report = "=== spotlessCheck ===`n$violations`n=== patch ===`n$patch"
-          Write-Host $report
-
-          # 匿名 Checks API 只暴露 annotation 的前 4096 个解码字符；保留包含补丁的日志尾部。
-          $escaped = $report.Substring([Math]::Max(0, $report.Length - 4000)).
-            Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
-          Write-Host "::warning title=Spotless violations (fix these in mihon/keiyoushi-module)::$escaped"
-          exit 0
-
-      - name: Run MockWebServer tests and release build
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $false
+          # spotlessCheck 必须显式列出：spotless 插件只把它挂到 check 上，而这里跑的
+          # testDebugUnitTest / assembleRelease 都不经过 check，漏掉就等于不检查格式。
+          # 排在最前面，格式问题能在漫长的编译之前先报出来。
           $gradlew = Join-Path $PWD '.keiyoushi-base/gradlew'
           $log = & $gradlew -p '.keiyoushi-base' --no-daemon `
+            ':src:all:folderlibrary:spotlessCheck' `
             ':src:all:folderlibrary:testDebugUnitTest' `
             ':src:all:folderlibrary:assembleRelease' 2>&1 | Out-String
           Write-Host $log
