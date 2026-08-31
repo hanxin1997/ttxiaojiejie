@@ -5,10 +5,12 @@ on:
   push:
     paths:
       - "mihon/keiyoushi-module/**"
+      - "mihon/signingkey.p12"
       - ".github/workflows/build-mihon-extension.yml"
   pull_request:
     paths:
       - "mihon/keiyoushi-module/**"
+      - "mihon/signingkey.p12"
       - ".github/workflows/build-mihon-extension.yml"
 
 permissions:
@@ -43,6 +45,19 @@ jobs:
             throw "Expected Keiyoushi $env:KEIYOUSHI_COMMIT but checked out $actual"
           }
 
+          # 签名完全交给底座，所以它选签名配置的方式就是这条流水线的依赖项。
+          # 底座换掉这个判断，就该在这里炸掉，而不是静默产出 Mihon 装不上的未签名包。
+          $pluginText = Get-Content -Raw -Encoding UTF8 `
+            -LiteralPath '.keiyoushi-base/gradle/build-logic/src/main/kotlin/ExtensionPlugin.kt'
+          if ($pluginText -notmatch 'rootProject\.file\("signingkey\.jks"\)\.exists\(\)') {
+            throw 'Pinned Keiyoushi no longer selects the signing config from signingkey.jks'
+          }
+          foreach ($name in @('KEY_STORE_PASSWORD', 'ALIAS', 'KEY_PASSWORD')) {
+            if ($pluginText -notmatch "environmentVariable\(`"$name`"\)") {
+              throw "Pinned Keiyoushi no longer reads the signing credential $name from the environment"
+            }
+          }
+
       - name: Install Folder Library module
         shell: pwsh
         run: |
@@ -50,23 +65,11 @@ jobs:
           $target = Join-Path $PWD ".keiyoushi-base/$env:KEIYOUSHI_MODULE"
           New-Item -ItemType Directory -Path $target -Force | Out-Null
 
-          # 官方底座默认用 debug key 签 release。PR 必须产出无生产签名 APK，
-          # 受保护分支再由下方 apksigner 使用固定仓库 Secrets 签名。
-          $pluginPath = '.keiyoushi-base/gradle/build-logic/src/main/kotlin/ExtensionPlugin.kt'
-          $pluginText = Get-Content -LiteralPath $pluginPath -Raw -Encoding UTF8
-          # 缩进必须和固定 commit 的原文逐字节一致：底座一改就该报错，而不是静默跳过替换。
-          $signingBlock = @'
-                              signingConfig = if (rootProject.file("signingkey.jks").exists()) {
-                                  signingConfigs.getByName("release")
-                              } else {
-                                  signingConfigs.getByName("debug")
-                              }
-          '@
-          if (-not $pluginText.Contains($signingBlock)) {
-            throw 'Pinned Keiyoushi signing block changed unexpectedly'
-          }
-          $pluginText = $pluginText.Replace($signingBlock, '                    signingConfig = null')
-          Set-Content -LiteralPath $pluginPath -Value $pluginText -Encoding UTF8
+          # 底座在 Gradle 构建期就签名：ExtensionPlugin 用 rootProject.file("signingkey.jks")
+          # 的存在与否选 release/debug 签名配置，所以密钥必须在跑 Gradle 之前放到底座根目录。
+          # 后缀是 .jks 但内容是 PKCS12：底座的 SignExtensionJarTask 按 JKS→PKCS12 依次试，
+          # AGP 走 KeyStore.getDefaultType()（JDK 17 = pkcs12），两条路都不看文件后缀。
+          Copy-Item -LiteralPath 'mihon/signingkey.p12' -Destination '.keiyoushi-base/signingkey.jks' -Force
 
           # 官方 core 图标作为本地源的轻量默认图标，避免为低配模块增加额外资源。
           Copy-Item -Path '.keiyoushi-base/core/src/main/res' -Destination (Join-Path $target 'res') -Recurse -Force
@@ -86,6 +89,13 @@ jobs:
 
       - name: Run Spotless, MockWebServer tests and release build
         shell: pwsh
+        env:
+          # 名字由底座定死（ExtensionPlugin 的 signingConfigs.create("release") 用
+          # providers.environmentVariable 读这三个），不能改成别的。
+          # 口令不是机密：密钥本身就随仓库走，这是个人局域网自签名，只为拿到稳定的签名身份。
+          ALIAS: folderlibrary
+          KEY_STORE_PASSWORD: folderlibrary
+          KEY_PASSWORD: folderlibrary
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
@@ -131,7 +141,7 @@ jobs:
           Write-Host "::error title=Gradle test/build failure::$escaped"
           exit 1
 
-      - name: Collect staging APK
+      - name: Collect release APK
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -139,7 +149,11 @@ jobs:
           $apk = Get-ChildItem -Path '.keiyoushi-base/src/all/folderlibrary/build/outputs/apk/release' -Filter '*.apk' -File |
             Select-Object -First 1
           if (-not $apk) { throw 'Release APK was not produced' }
-          Copy-Item -LiteralPath $apk.FullName -Destination 'artifacts/folder-library-1.6-staging.apk' -Force
+          # 保留底座生成的 tachiyomi-all.folderlibrary-v<libVersion>.<versionCode>.apk 文件名：
+          # 换成固定名就丢了 versionCode，而 Android 拒绝降级安装，分不清版本没法排查。
+          $collected = Join-Path 'artifacts' $apk.Name
+          Copy-Item -LiteralPath $apk.FullName -Destination $collected -Force
+          "RELEASE_APK=$collected" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Resolve apksigner
         shell: pwsh
@@ -159,65 +173,33 @@ jobs:
           Write-Host "Using apksigner: $apksigner"
           "APKSIGNER=$apksigner" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Report staging APK signature state
+      - name: Verify release APK signature
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          # 不再断言"暂存产物必须未签名"：签名状态取决于底座构建期有没有 signingkey.jks
-          # （keiyoushi build_push.yml 先写它再跑 Gradle），不是这一步能决定的事，拿它当
-          # 断言只会在两个方向上都误报。这里只守一条硬红线：生产密钥不得出现在非受保护
-          # 分支的产物里；其余情况把真实状态报出来，不掩盖编译已经成功的事实。
-          $verification = & $env:APKSIGNER verify --verbose --print-certs `
-            'artifacts/folder-library-1.6-staging.apk' 2>&1 | Out-String
+          # 密钥随仓库走，签名状态因此是确定的，可以硬断言了。这不是安全检查，是安装前提：
+          # Mihon 的 ExtensionLoader 对未签名包直接返回 LoadResult.Error，装不上等于白跑。
+          $verification = & $env:APKSIGNER verify --verbose --print-certs $env:RELEASE_APK 2>&1 | Out-String
           $verified = $LASTEXITCODE -eq 0
           Write-Host $verification
-
-          # debug 证书的 DN 由 AGP 写死（KeystoreHelper.CERTIFICATE_DESC），不需要配指纹。
-          $foreignSigners = [regex]::Matches($verification, '(?m)^Signer #\d+ certificate DN: (.+)$') |
-            ForEach-Object { $_.Groups[1].Value.Trim() } |
-            Where-Object { $_ -notmatch 'CN=Android Debug' }
-          if ($foreignSigners) {
-            Write-Host "::error title=Production key leaked into staging APK::$($foreignSigners -join '; ')"
+          if (-not $verified) {
+            # 完整输出上面已经 Write-Host 过了；annotation 只带首行结论，避免嵌套引号和转义。
+            $reason = ($verification -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+            Write-Host "::error title=Release APK is not signed::$reason"
             exit 1
           }
 
-          if ($verified) {
-            Write-Host 'Staging APK is debug-signed.'
-          } else {
-            $hint = 'Mihon cannot install an unsigned APK. The base signs during the Gradle build ' +
-              'from signingkey.jks; no keystore is wired into this workflow yet.'
-            Write-Host "::warning title=Staging APK is unsigned::$hint"
+          # 必须是仓库里那把固定密钥。落回 AGP 自动生成的 debug key（CN=Android Debug）时
+          # 每次 CI 的签名都不同，Android 会拒绝覆盖安装，用户每次更新都得先卸载。
+          $signers = [regex]::Matches($verification, '(?m)^Signer #\d+ certificate DN: (.+)$') |
+            ForEach-Object { $_.Groups[1].Value.Trim() }
+          $unexpected = $signers | Where-Object { $_ -notmatch '^CN=Folder Library' }
+          if (-not $signers -or $unexpected) {
+            Write-Host "::error title=Unexpected APK signer::$($signers -join '; ')"
+            exit 1
           }
-          exit 0
-
-      - name: Sign protected-branch APK
-        if: github.event_name == 'push' && github.ref_protected == true
-        shell: pwsh
-        env:
-          MIHON_KEYSTORE_BASE64: ${{ secrets.MIHON_KEYSTORE_BASE64 }}
-          MIHON_KEY_ALIAS: ${{ secrets.MIHON_KEY_ALIAS }}
-          MIHON_STORE_PASSWORD: ${{ secrets.MIHON_STORE_PASSWORD }}
-          MIHON_KEY_PASSWORD: ${{ secrets.MIHON_KEY_PASSWORD }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          foreach ($name in @('MIHON_KEYSTORE_BASE64', 'MIHON_KEY_ALIAS', 'MIHON_STORE_PASSWORD', 'MIHON_KEY_PASSWORD')) {
-            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-              throw "Missing required signing secret: $name"
-            }
-          }
-
-          $keystore = Join-Path $env:RUNNER_TEMP 'folder-library.jks'
-          [IO.File]::WriteAllBytes($keystore, [Convert]::FromBase64String($env:MIHON_KEYSTORE_BASE64))
-
-          & $env:APKSIGNER sign `
-            --ks $keystore `
-            --ks-key-alias $env:MIHON_KEY_ALIAS `
-            --ks-pass 'env:MIHON_STORE_PASSWORD' `
-            --key-pass 'env:MIHON_KEY_PASSWORD' `
-            --out 'artifacts/folder-library-1.6-signed.apk' `
-            'artifacts/folder-library-1.6-staging.apk'
-          & $env:APKSIGNER verify --verbose --print-certs 'artifacts/folder-library-1.6-signed.apk'
+          Write-Host "Release APK signed by: $($signers -join '; ')"
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4

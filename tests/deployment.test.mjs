@@ -10,7 +10,7 @@ test('runtime container installs production dependencies so Sharp cannot silentl
   assert.match(runtimeStage, /\/api\/health\/ready/);
 });
 
-test('Mihon workflow pins the 1.6 build base and separates unsigned PRs from protected signing', async () => {
+test('Mihon workflow pins the 1.6 build base and signs the APK with the in-repo keystore', async () => {
   const workflow = await fs.readFile(
     new URL('../.github/workflows/build-mihon-extension.yml', import.meta.url),
     'utf8',
@@ -29,25 +29,41 @@ test('Mihon workflow pins the 1.6 build base and separates unsigned PRs from pro
   assert.doesNotMatch(workflow, /sdkmanager/);
   assert.doesNotMatch(workflow, /build-tools[;/]\d/);
   assert.match(workflow, /"APKSIGNER=\$apksigner"/);
-  assert.match(workflow, /if: github\.event_name == 'push' && github\.ref_protected == true/);
-  for (const secret of [
-    'MIHON_KEYSTORE_BASE64',
-    'MIHON_KEY_ALIAS',
-    'MIHON_STORE_PASSWORD',
-    'MIHON_KEY_PASSWORD',
-  ]) {
-    assert.match(workflow, new RegExp(`secrets\\.${secret}`));
-  }
-  assert.match(workflow, /name: Report staging APK signature state/);
-  assert.match(workflow, /\$env:APKSIGNER verify --verbose --print-certs/);
 
-  // 签名状态由底座构建期有没有 signingkey.jks 决定，两个方向的断言都会误报：
-  // 断言"必须未签名"会在配了密钥时炸，断言"必须已签名"会在没配时炸。只守生产密钥不外泄。
-  assert.doesNotMatch(workflow, /unexpectedly signed/);
-  assert.doesNotMatch(workflow, /folder-library-1\.6-unsigned\.apk/);
+  // 签名交回底座的构建期签名路径：APK 必须在 Gradle 跑之前就能看到 signingkey.jks。
+  // 先前那个 signingConfig = null 补丁是产出装不上的未签名包的直接原因，不能回来。
+  assert.doesNotMatch(workflow, /signingConfig = null/);
+  assert.match(
+    workflow,
+    /Copy-Item -LiteralPath 'mihon\/signingkey\.p12' -Destination '\.keiyoushi-base\/signingkey\.jks' -Force/,
+  );
+  // 这三个名字由底座的 signingConfigs.create("release") 定死，改一个字签名就静默落回 debug。
+  for (const [name, value] of [
+    ['ALIAS', 'folderlibrary'],
+    ['KEY_STORE_PASSWORD', 'folderlibrary'],
+    ['KEY_PASSWORD', 'folderlibrary'],
+  ]) {
+    assert.match(workflow, new RegExp(`^\\s+${name}: ${value}$`, 'm'));
+  }
+  // 底座换掉选签名配置的方式就该炸，而不是静默产出 Mihon 装不上的包。
+  assert.match(workflow, /no longer selects the signing config from signingkey\.jks/);
+  assert.match(workflow, /no longer reads the signing credential \$name from the environment/);
+
+  // 受保护分支补签步骤已删除：main 不受保护（ref_protected 恒为 false），它永远不会执行，
+  // 而底座已在构建期签好名，再拿 apksigner 补签就是和它的设计对着干。
+  assert.doesNotMatch(workflow, /github\.ref_protected/);
+  assert.doesNotMatch(workflow, /secrets\.MIHON_/);
+  assert.doesNotMatch(workflow, /APKSIGNER sign/);
+
+  // 签名状态现在是确定的，必须硬断言——Mihon 的 ExtensionLoader 直接拒绝未签名包。
+  assert.match(workflow, /name: Verify release APK signature/);
+  assert.match(workflow, /\$env:APKSIGNER verify --verbose --print-certs \$env:RELEASE_APK/);
   assert.match(workflow, /Signer #\\d\+ certificate DN: \(\.\+\)/);
-  assert.match(workflow, /\$_ -notmatch 'CN=Android Debug'/);
-  assert.match(workflow, /::error title=Production key leaked into staging APK/);
+  assert.match(workflow, /\$_ -notmatch '\^CN=Folder Library'/);
+  assert.match(workflow, /::error title=Unexpected APK signer/);
+  // 固定文件名会丢掉 versionCode，而 Android 拒绝降级安装，分不清版本就没法排查。
+  assert.match(workflow, /"RELEASE_APK=\$collected"/);
+  assert.doesNotMatch(workflow, /folder-library-1\.6-(unsigned|staging|signed)\.apk/);
 
   // 扩展编译不得依赖其他 job：一旦挂上 needs，上游失败会让 APK 构建变成 skipped 而不是失败。
   assert.doesNotMatch(workflow, /^\s+needs:/m);
@@ -75,6 +91,17 @@ test('Mihon workflow pins the 1.6 build base and separates unsigned PRs from pro
   assert.doesNotMatch(workflow, /Select-String -Pattern '<\(failure\|error\)/);
   assert.match(workflow, /\$_ -match \'\^\\s\*at \.\*folderlibrary\'/);
   assert.match(workflow, /\$budget = 4000 - \$failures\.Length/);
+});
+
+test('Mihon signing keystore is a usable PKCS12 store committed alongside the module', async () => {
+  const keystore = await fs.readFile(new URL('../mihon/signingkey.p12', import.meta.url));
+
+  // 不是安全边界，是安装前提：Mihon 的 ExtensionLoader 拒绝未签名包，而 AGP 自动生成的
+  // debug key 每次 CI 都不同，签名一换 Android 就拒绝覆盖安装。所以要一把固定的密钥。
+  // 只验 DER 外壳：PKCS12 是 SEQUENCE，两字节长度（0x30 0x82），空文件/文本占位符会被挡住。
+  assert.equal(keystore[0], 0x30);
+  assert.equal(keystore[1], 0x82);
+  assert.ok(keystore.length > 1024, `keystore is only ${keystore.length} bytes`);
 });
 
 test('Mihon JVM tests include the runtime dependencies that official modules compileOnly', async () => {

@@ -1,0 +1,3 @@
+# core.autocrlf=true 下，二进制 keystore 若被 git 误判成文本就会被换行转换悄悄改坏，
+# 而症状只会在 CI 里表现为「keystore 读不出私钥」。不靠 git 的启发式检测，写死。
+*.p12 binary
