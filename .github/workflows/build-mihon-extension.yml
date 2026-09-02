@@ -19,6 +19,9 @@ permissions:
 env:
   KEIYOUSHI_COMMIT: 5083ff5d06b9cb7736216ae0fbd0be3828bcce2c
   KEIYOUSHI_MODULE: src/all/folderlibrary
+  # mihon/signingkey.p12 里那张证书的 SHA-256 指纹。换密钥就必须同步改这里——
+  # 签名身份静默变化会让 Android 拒绝覆盖安装，那种失败必须在 CI 里炸出来。
+  SIGNING_CERT_SHA256: 70a409d14b8f6d9a7863571d6c16479d06a4c14f87852bf27341d27d2990b1f8
 
 jobs:
   test-and-build:
@@ -180,26 +183,32 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $false
           # 密钥随仓库走，签名状态因此是确定的，可以硬断言了。这不是安全检查，是安装前提：
           # Mihon 的 ExtensionLoader 对未签名包直接返回 LoadResult.Error，装不上等于白跑。
-          $verification = & $env:APKSIGNER verify --verbose --print-certs $env:RELEASE_APK 2>&1 | Out-String
-          $verified = $LASTEXITCODE -eq 0
-          Write-Host $verification
-          if (-not $verified) {
-            # 完整输出上面已经 Write-Host 过了；annotation 只带首行结论，避免嵌套引号和转义。
-            $reason = ($verification -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
-            Write-Host "::error title=Release APK is not signed::$reason"
-            exit 1
-          }
+          try {
+            $verification = & $env:APKSIGNER verify --verbose --print-certs $env:RELEASE_APK 2>&1 | Out-String
+            $exitCode = $LASTEXITCODE
+            Write-Host $verification
+            if ($exitCode -ne 0) { throw "apksigner verify exited $exitCode" }
 
-          # 必须是仓库里那把固定密钥。落回 AGP 自动生成的 debug key（CN=Android Debug）时
-          # 每次 CI 的签名都不同，Android 会拒绝覆盖安装，用户每次更新都得先卸载。
-          $signers = [regex]::Matches($verification, '(?m)^Signer #\d+ certificate DN: (.+)$') |
-            ForEach-Object { $_.Groups[1].Value.Trim() }
-          $unexpected = $signers | Where-Object { $_ -notmatch '^CN=Folder Library' }
-          if (-not $signers -or $unexpected) {
-            Write-Host "::error title=Unexpected APK signer::$($signers -join '; ')"
+            # 断言证书指纹而不是 DN。DN 靠不住：apksigner 把 RDN 反序打印
+            # （C=CN, O=tpap, CN=Folder Library），且行前缀随 build-tools 版本变
+            # （Signer #1 / V2 Signer:）。指纹才是稳定身份，也正是 Mihon 判断信任用的东西。
+            # 行首必须放开匹配前缀，但 certificate 这个词不能省——同一份输出里还有
+            # public key SHA-256 digest，抓错行就等于什么都没验。
+            $found = [regex]::Matches($verification, '(?m)^.*certificate SHA-256 digest: ([0-9a-f]{64})\s*$') |
+              ForEach-Object { $_.Groups[1].Value } |
+              Select-Object -Unique
+            $unexpected = $found | Where-Object { $_ -ne $env:SIGNING_CERT_SHA256 }
+            if (-not $found -or $unexpected) {
+              throw "expected certificate $env:SIGNING_CERT_SHA256 but found [$($found -join ', ')]"
+            }
+            Write-Host "Release APK signed by the pinned certificate $env:SIGNING_CERT_SHA256"
+          } catch {
+            # 终止性错误自己不会留下 ::error，而空消息的 annotation 会被 GitHub 直接丢掉，
+            # 日志里就只剩一句 exit code 1（上一版正是这样瞎了一轮）。这层保证失败带着现场出来。
+            $reason = $_.Exception.Message -replace '\s*\r?\n\s*', ' '
+            Write-Host "::error title=Release APK signature check failed::$reason"
             exit 1
           }
-          Write-Host "Release APK signed by: $($signers -join '; ')"
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
