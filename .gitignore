@@ -14,3 +14,10 @@ web/node_modules/
 web/dist/
 web/playwright-report/
 web/test-results/
+
+# Gradle 缓存与构建产物。放在根上而不是各模块自己一份：mihon/ 下的模块都会生成这些，
+# 而 build-mihon-extension.yml 按 mihon/keiyoushi-module/** 触发、并把该目录整个递归
+# 拷进底座，误提交一次就既污染仓库又污染构建。
+.gradle/
+build/
+local.properties
