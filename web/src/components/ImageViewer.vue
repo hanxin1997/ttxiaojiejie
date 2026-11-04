@@ -7,16 +7,22 @@
     transform-origin="center"
     @update:show="handleClose"
   >
-    <div class="viewer-fullscreen" tabindex="0" ref="viewerRef">
+    <div class="viewer-fullscreen" :class="{ 'viewer-eink': readingMode === 'eink' }" tabindex="0" ref="viewerRef">
       <!-- 顶部栏 -->
       <div class="viewer-topbar">
-        <n-button quaternary circle size="small" @click="handleClose(false)">
+        <n-button aria-label="关闭阅读" quaternary circle size="small" @click="handleClose(false)">
           <template #icon><n-icon size="20"><CloseOutline /></n-icon></template>
         </n-button>
         <n-text style="font-size: 14px; font-weight: 500">{{ title }}</n-text>
         <n-text depth="3" style="font-size: 13px">
           {{ currentIndex + 1 }} / {{ pageUrls.length }}
         </n-text>
+        <select v-model="readingMode" aria-label="阅读画质" class="reading-mode">
+          <option value="original">原图</option>
+          <option value="balanced">平衡</option>
+          <option value="lite">省流</option>
+          <option value="eink">墨水屏</option>
+        </select>
       </div>
 
       <!-- 主图区域 -->
@@ -40,17 +46,18 @@
 
         <div class="viewer-image-area" ref="imageAreaRef">
           <img
-            v-if="pageUrls[currentIndex]"
-            :key="pageUrls[currentIndex]"
-            :src="pageUrls[currentIndex]"
+            v-if="visible && currentImageUrl"
+            :key="currentImageUrl"
+            :src="currentImageUrl"
             :alt="`Page ${currentIndex + 1}`"
             class="viewer-image"
             :style="imageTransformStyle"
-            @load="imageLoading = false"
+            @load="handleImageLoaded"
             @error="imageLoading = false"
           />
           <div v-if="imageLoading" class="viewer-loading">
-            <n-spin size="large" />
+            <span v-if="readingMode === 'eink'">加载中…</span>
+            <n-spin v-else size="large" />
           </div>
         </div>
 
@@ -94,8 +101,8 @@
 import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue'
 import { NModal, NButton, NIcon, NText, NSpin, NSlider } from 'naive-ui'
 import { ChevronBackOutline, ChevronForwardOutline, CloseOutline } from '@vicons/ionicons5'
+import { createReaderPrefetcher, readerImageUrl, type ReadingMode } from '../utils/reader'
 
-const PRELOAD_COUNT = 2
 const PROGRESS_DEBOUNCE_MS = 1000
 
 const props = defineProps<{
@@ -117,6 +124,13 @@ const currentIndex = ref(0)
 const imageLoading = ref(false)
 const viewerRef = ref<HTMLElement | null>(null)
 const imageAreaRef = ref<HTMLElement | null>(null)
+const readingMode = ref<ReadingMode>('original')
+try {
+  const stored = localStorage.getItem('reader-mode')
+  if (stored && ['original', 'balanced', 'lite', 'eink'].includes(stored)) readingMode.value = stored as ReadingMode
+} catch { /* Storage may be disabled; reading still works. */ }
+const currentImageUrl = computed(() => readerImageUrl(props.pageUrls[currentIndex.value] ?? '', readingMode.value))
+const prefetcher = createReaderPrefetcher()
 
 // ===== 缩放状态 =====
 const zoomScale = ref(1)
@@ -225,19 +239,13 @@ function handleDoubleTap() {
 }
 
 // ===== 图片预加载 =====
-const preloadedUrls = new Set<string>()
-
-function preloadImages(centerIndex: number) {
-  for (let offset = -PRELOAD_COUNT; offset <= PRELOAD_COUNT; offset++) {
-    const idx = centerIndex + offset
-    if (idx < 0 || idx >= props.pageUrls.length || idx === centerIndex) continue
-    const url = props.pageUrls[idx]
-    if (url && !preloadedUrls.has(url)) {
-      preloadedUrls.add(url)
-      const img = new Image()
-      img.src = url
-    }
-  }
+function handleImageLoaded() {
+  imageLoading.value = false
+  if (!props.visible) return
+  // Start only after the current page loads; low-end devices look ahead just one page.
+  const count = readingMode.value === 'eink' ? 1 : 2
+  prefetcher.update(props.pageUrls.slice(currentIndex.value + 1, currentIndex.value + 1 + count)
+    .map((url) => readerImageUrl(url, readingMode.value)))
 }
 
 // ===== 阅读进度保存（防抖） =====
@@ -251,15 +259,14 @@ function saveProgressDebounced() {
 }
 
 // ===== 核心逻辑 =====
-watch(() => props.visible, (v) => {
+watch(() => [props.visible, props.chapterId] as const, ([v]) => {
+  prefetcher.clear()
   if (v) {
-    currentIndex.value = props.initialIndex ?? 0
+    currentIndex.value = Math.max(0, Math.min(props.initialIndex ?? 0, props.pageUrls.length - 1))
     imageLoading.value = true
     resetZoom()
-    preloadedUrls.clear()
     nextTick(() => {
       viewerRef.value?.focus()
-      preloadImages(currentIndex.value)
     })
   } else {
     // 关闭时立即保存进度
@@ -270,12 +277,19 @@ watch(() => props.visible, (v) => {
   }
 })
 
-watch(currentIndex, (newIndex) => {
+watch(currentImageUrl, () => {
+  prefetcher.clear()
   imageLoading.value = true
   resetZoom()
-  preloadImages(newIndex)
-  saveProgressDebounced()
+  if (props.visible) saveProgressDebounced()
 })
+
+watch(readingMode, (value) => {
+  try { localStorage.setItem('reader-mode', value) } catch { /* Optional local preference. */ }
+})
+watch(() => props.visible && readingMode.value === 'eink', (enabled) => {
+  document.body.classList.toggle('reader-eink', enabled)
+}, { immediate: true, flush: 'sync' })
 
 function prev() { if (currentIndex.value > 0) currentIndex.value-- }
 function next() { if (currentIndex.value < props.pageUrls.length - 1) currentIndex.value++ }
@@ -305,10 +319,20 @@ function globalKeyHandler(e: KeyboardEvent) {
 
 onMounted(() => document.addEventListener('keydown', globalKeyHandler))
 onUnmounted(() => {
+  prefetcher.clear()
+  document.body.classList.remove('reader-eink')
   document.removeEventListener('keydown', globalKeyHandler)
   if (progressTimer) clearTimeout(progressTimer)
 })
 </script>
+
+<style>
+/* Suppress the modal's own transitions as well as its contents on e-ink displays. */
+.reader-eink .n-modal-container *, .reader-eink .n-modal-mask {
+  animation: none !important;
+  transition: none !important;
+}
+</style>
 
 <style scoped>
 .viewer-fullscreen {
@@ -331,6 +355,11 @@ onUnmounted(() => {
   flex-shrink: 0;
   z-index: 2;
 }
+.reading-mode { margin-left: auto; max-width: 100px; padding: 4px; color: inherit; background: inherit; }
+.viewer-eink { background: #fff; color: #000; }
+.viewer-eink .viewer-topbar, .viewer-eink .viewer-pager { background: #fff; }
+.viewer-eink :deep(.n-text), .viewer-eink :deep(.n-button) { color: #000 !important; }
+.viewer-eink :deep(.n-button) { background: #fff !important; }
 @media (prefers-color-scheme: dark) {
   .viewer-topbar {
     background-color: rgba(30, 30, 30, 0.96);

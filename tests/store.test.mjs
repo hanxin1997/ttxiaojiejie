@@ -165,6 +165,119 @@ test('AppStore stores and reloads a catalog through normalized relation tables',
   await reloaded.close();
 });
 
+test('v4 upgrade preserves settings, overrides, progress and existing image pages', async (t) => {
+  const { store, config, tempRoot } = await createStore('folder-library-v4-upgrade-');
+  let reopened;
+  t.after(async () => {
+    await reopened?.close();
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  });
+  await store.replaceLibrary(createLibrary());
+  await store.replaceSettings({ scanIntervalMinutes: 37 });
+  await store.toggleFavorite('series/a');
+  await store.setSeriesCategories('series/a', ['My category']);
+  await store.setMetadata('series/a', { title: 'My title', author: 'My author' });
+  await store.setTags('series/a', ['My tag']);
+  await store.setCustomCover('series/a', 'chapter-1', 2);
+  await store.setReadProgress('series/a', { chapterId: 'chapter-1', pageIndex: 1, totalPages: 2 });
+  const overrides = store.getOverrides();
+  const revision = store.revision;
+  await store.close();
+
+  // 移除仅 v5 新增的两列，得到真实的旧关系表布局及已有用户数据。
+  const previous = new DatabaseSync(config.databaseFile);
+  previous.exec('ALTER TABLE pages DROP COLUMN archive_entry_json');
+  previous.exec('ALTER TABLE series DROP COLUMN cover_archive_entry_json');
+  previous.exec('ALTER TABLE chapters DROP COLUMN archive_source_json');
+  previous.exec('ALTER TABLE chapters DROP COLUMN scan_fingerprint');
+  previous.exec('DROP TABLE series_fts_documents');
+  previous.prepare("UPDATE app_meta SET value = '4' WHERE key = 'schema_version'").run();
+  previous.close();
+
+  reopened = new AppStore(config);
+  await reopened.init();
+  assert.equal(reopened.getSettings().scanIntervalMinutes, 37);
+  assert.deepEqual(reopened.getOverrides(), overrides);
+  assert.equal(reopened.revision, revision);
+  assert.equal((await reopened.queryChapterPageAsync('chapter-1', 2)).sourcePath, '/library/series/a/2.jpg');
+  assert.equal((await reopened.queryChapterPageAsync('chapter-1', 2)).archiveEntry, null);
+  assert.equal(reopened.getDatabase().prepare("SELECT value FROM app_meta WHERE key = 'schema_version'").get().value, String(STORE_SCHEMA_VERSION));
+});
+
+test('archive page and cover descriptors survive restart and consecutive reused scans', async (t) => {
+  const { store, config, tempRoot } = await createStore('folder-library-archive-store-');
+  let active = store;
+  t.after(async () => {
+    await active.close();
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  });
+  const library = createLibrary();
+  const series = library.series[0];
+  const chapter = series.volumes[0].chapters[0];
+  chapter.sourcePath = '/library/series/a/漫画.cbz';
+  chapter.pages = chapter.pages.map((page, index) => ({
+    ...page,
+    sourcePath: chapter.sourcePath,
+    archiveEntry: {
+      version: 1, index, name: `${index + 1}.jpg`, crc32: index + 1,
+      compressedSize: 10, uncompressedSize: page.sizeBytes, compressionMethod: 8,
+      archiveIdentity: { size: 150, mtimeMs: 1, ctimeMs: 2 },
+    },
+  }));
+  series.cover = { ...chapter.pages[0], fileName: '1.jpg' };
+  await store.replaceLibrary(library);
+  await store.close();
+  active = new AppStore(config);
+  await active.init();
+
+  for (let scan = 0; scan < 2; scan += 1) {
+    const reused = active.getLibrary();
+    assert.equal(reused.series[0].volumes[0].chapters[0].pages.length, 0);
+    reused.series[0]._reused = true;
+    await active.replaceLibrary(reused);
+    assert.deepEqual((await active.queryChapterPageAsync(chapter.id, 2)).archiveEntry, chapter.pages[1].archiveEntry);
+    assert.deepEqual((await active.queryCoverPathAsync(series.id)).archiveEntry, series.cover.archiveEntry);
+  }
+  const detail = await active.querySeriesDetailAsync(series.id);
+  assert.equal(detail.counts.pages, 2);
+  assert.doesNotMatch(JSON.stringify(detail), /archiveEntry|archiveIdentity|sourcePath/);
+});
+
+test('rescans ignore obsolete page overrides without deleting them and use current chapter length', async (t) => {
+  const { store, tempRoot } = await createStore('folder-library-obsolete-cover-');
+  t.after(async () => {
+    await store.close();
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  });
+  await store.replaceLibrary(createLibrary());
+  await store.setCustomCover('series/a', 'chapter-1', 2);
+  await store.setReadProgress('series/a', { chapterId: 'chapter-1', pageIndex: 2, totalPages: 2 });
+
+  const library = createLibrary();
+  library.series[0].volumes[0].chapters[0].id = 'cbz-chapter';
+  await store.replaceLibrary(library);
+  assert.equal(store.getCustomCover('series/a'), null);
+  assert.equal(store.getReadProgress('series/a'), null);
+  assert.equal(store.getOverrides().customCovers['series/a'].chapterId, 'chapter-1');
+  assert.equal(store.getOverrides().readProgress['series/a'].chapterId, 'chapter-1');
+  for (const query of [
+    () => store.querySeriesPage({}, { page: 1, pageSize: 10 }),
+    () => store.querySeriesPageAsync({}, { page: 1, pageSize: 10 }),
+  ]) {
+    const item = (await query()).items[0];
+    assert.equal(item.coverUrl, '/media/cover/series-1');
+    assert.equal(item.readProgress, null);
+    assert.equal(item.readStatus, 'unread');
+  }
+  assert.equal((await store.querySeriesPageAsync({ readStatus: 'unread' }, { page: 1, pageSize: 10 })).total, 1);
+
+  await store.setReadProgress('series/a', { chapterId: 'cbz-chapter', pageIndex: 1, totalPages: 1 });
+  const current = (await store.querySeriesPageAsync({}, { page: 1, pageSize: 10 })).items[0];
+  assert.equal(current.readProgress.totalPages, 2);
+  assert.equal(current.readStatus, 'reading');
+  assert.equal(store.getReadProgress('series/a').totalPages, 2);
+});
+
 test('reused scanner summaries preserve database pages without retaining page snapshots in memory', async () => {
   const { store } = await createStore('folder-library-store-reused-');
   const initial = createLibrary();
@@ -282,4 +395,273 @@ test('AppStore persists settings without exposing legacy backup compatibility', 
   assert.deepEqual(reloaded.getSettings().categoryFolders, [{ name: 'Featured', folder: 'featured' }]);
   assert.deepEqual(reloaded.getTags('series/a'), ['tag-a']);
   await reloaded.close();
+});
+
+test('concurrent queued metadata and tags publish their combined FTS content', async (t) => {
+  const { store, tempRoot } = await createStore('folder-library-write-publication-');
+  t.after(async () => { await store.close(); await fs.rm(tempRoot, { recursive: true, force: true }); });
+  await store.replaceLibrary(createLibrary());
+  await Promise.all([
+    store.setMetadata('series/a', { title: 'Concurrent Title' }),
+    store.setTags('series/a', ['concurrenttag']),
+  ]);
+  const row = store.getDatabase().prepare('SELECT title,tags FROM series_fts').get();
+  assert.equal(row.title, 'Concurrent Title');
+  assert.equal(row.tags, 'concurrenttag');
+});
+
+test('concurrent favorite toggles preserve sequential toggle semantics', async (t) => {
+  const { store, tempRoot } = await createStore('folder-library-toggle-queue-');
+  t.after(async () => { await store.close(); await fs.rm(tempRoot, { recursive: true, force: true }); });
+  await store.replaceLibrary(createLibrary());
+  await Promise.all([store.toggleFavorite('series/a'), store.toggleFavorite('series/a')]);
+  assert.equal(store.isFavorite('series/a'), false);
+});
+
+test('v5 migration preserves catalog, FTS rowids and overrides while removing redundant indexes', async (t) => {
+  const { store, config, tempRoot } = await createStore('folder-library-v5-upgrade-');
+  let active = store;
+  t.after(async () => { await active.close(); await fs.rm(tempRoot, { recursive: true, force: true }); });
+  await store.replaceLibrary(createLibrary());
+  await store.setMetadataAndTags('series/a', { title: 'Migrated Title' }, ['migrationtag']);
+  await store.toggleFavorite('series/a');
+  const before = store.getOverrides();
+  const rowid = store.getDatabase().prepare('SELECT rowid FROM series_fts').get().rowid;
+  await store.close();
+  const old = new DatabaseSync(config.databaseFile);
+  old.exec(`
+    ALTER TABLE chapters DROP COLUMN archive_source_json;
+    ALTER TABLE chapters DROP COLUMN scan_fingerprint;
+    DROP TABLE series_fts_documents;
+    CREATE INDEX volumes_series_idx ON volumes(series_id,position);
+    CREATE INDEX chapters_volume_idx ON chapters(volume_id,position);
+    CREATE INDEX pages_chapter_idx ON pages(chapter_id,position);
+    UPDATE app_meta SET value='5' WHERE key='schema_version';
+  `);
+  old.close();
+  active = new AppStore(config);
+  await active.init();
+  assert.deepEqual(active.getOverrides(), before);
+  assert.equal(active.getDatabase().prepare('SELECT document_id FROM series_fts_documents').get().document_id, rowid);
+  assert.equal((await active.querySeriesPageAsync({ search: 'migrationtag' }, { page: 1, pageSize: 10 })).total, 1);
+  for (const [table, removed] of [['volumes', 'volumes_series_idx'], ['chapters', 'chapters_volume_idx'], ['pages', 'pages_chapter_idx']]) {
+    const indexes = active.getDatabase().prepare(`PRAGMA index_list(${table})`).all();
+    assert.equal(indexes.some((index) => index.name === removed), false);
+    assert.ok(indexes.some((index) => index.unique));
+  }
+  assert.match(active.getDatabase().prepare('EXPLAIN QUERY PLAN SELECT * FROM pages WHERE chapter_id=? AND position=?').all('chapter-1', 1).map((row) => row.detail).join(' '), /sqlite_autoindex_pages/);
+});
+
+test('unchanged scans preserve FTS rows and single or batch edits use the stable mapping', async (t) => {
+  const { store, tempRoot } = await createStore('folder-library-fts-stable-');
+  t.after(async () => { await store.close(); await fs.rm(tempRoot, { recursive: true, force: true }); });
+  await store.replaceLibrary(createLibrary());
+  const db = store.getDatabase();
+  const firstRow = db.prepare('SELECT rowid,* FROM series_fts').get();
+  const reused = store.getLibrary();
+  reused.series[0]._reused = true;
+  await store.replaceLibrary(reused);
+  assert.equal(store.getDatabaseWriteWorkerMetrics().lastWrite.ftsUpdated, 0);
+  assert.deepEqual(db.prepare('SELECT rowid,* FROM series_fts').get(), firstRow);
+  const revision = store.revision;
+  await store.batchSetTags(['series/a'], ['beta', 'alpha']);
+  assert.equal(store.revision, revision + 1);
+  assert.equal(db.prepare('SELECT rowid FROM series_fts').get().rowid, firstRow.rowid);
+  await store.batchSetTags(['series/a'], ['gamma']);
+  assert.deepEqual(new Set(store.getTags('series/a')), new Set(['alpha', 'beta', 'gamma']));
+  await store.batchSetTags(['series/a'], ['replacement'], { mode: 'replace' });
+  await store.setMetadataAndTags('series/a', { title: 'Stable Title' }, ['lasttag']);
+  assert.equal(db.prepare('SELECT rowid FROM series_fts').get().rowid, firstRow.rowid);
+  assert.equal((await store.querySeriesPageAsync({ search: 'lasttag' }, { page: 1, pageSize: 10 })).total, 1);
+  await store.replaceLibrary({ ...createLibrary(), series: [], stats: { seriesCount: 0 } });
+  assert.equal(db.prepare('SELECT count(*) AS n FROM series_fts').get().n, 0);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM series_fts_documents').get().n, 0);
+});
+
+test('chapter archive identity survives restart and mixed reused/new chapter replacement', async (t) => {
+  const { store, config, tempRoot } = await createStore('folder-library-chapter-reuse-');
+  let active = store;
+  t.after(async () => { await active.close(); await fs.rm(tempRoot, { recursive: true, force: true }); });
+  const library = createLibrary();
+  const chapter = library.series[0].volumes[0].chapters[0];
+  chapter.scanFingerprint = 'cbz-chapter-v1:stable';
+  chapter.archiveSource = { version: 1, identity: { size: 30, mtimeMs: 1, ctimeMs: 2 }, firstPage: chapter.pages[0], latestPageMtime: 2 };
+  await store.replaceLibrary(library);
+  await store.close();
+  active = new AppStore(config);
+  await active.init();
+  const next = active.getLibrary();
+  const original = next.series[0].volumes[0].chapters[0];
+  assert.deepEqual(original.archiveSource, chapter.archiveSource);
+  assert.equal(original.scanFingerprint, chapter.scanFingerprint);
+  original._reused = true;
+  const newChapter = { ...chapter, id: 'chapter-2', sourceKey: 'series/a/new', title: 'New', scanFingerprint: null,
+    archiveSource: null, pages: [{ ...chapter.pages[0], sourcePath: '/library/new.jpg' }], pageCount: 1 };
+  // Reorder retained and inserted chapters: temporary negative positions prevent UNIQUE collisions.
+  next.series[0].volumes[0].chapters = [newChapter, original];
+  await active.replaceLibrary(next);
+  assert.equal((await active.queryChapterPageAsync('chapter-1', 2)).sourcePath, chapter.pages[1].sourcePath);
+  assert.equal((await active.queryChapterPageAsync('chapter-2', 1)).sourcePath, '/library/new.jpg');
+  assert.equal(active.getDatabaseWriteWorkerMetrics().lastWrite.reusedChapters, 1);
+  assert.equal('_reused' in active.findChapterById('chapter-1'), false);
+  assert.equal(active.findChapterById('chapter-1').pages.length, 0);
+});
+
+test('failed scan rolls back pages, FTS and revision and leaves the published snapshot intact', async (t) => {
+  const { store, tempRoot } = await createStore('folder-library-write-rollback-');
+  t.after(async () => { await store.close(); await fs.rm(tempRoot, { recursive: true, force: true }); });
+  await store.replaceLibrary(createLibrary());
+  const revision = store.revision;
+  const previous = store.getLibraryRef();
+  const invalid = createLibrary();
+  invalid.series[0].title = 'Uncommitted';
+  invalid.series[0].volumes[0].chapters[0].pages.push({ ...invalid.series[0].volumes[0].chapters[0].pages[0] });
+  await assert.rejects(store.replaceLibrary(invalid), /UNIQUE constraint/i);
+  assert.equal(store.getLibraryRef(), previous);
+  assert.equal(store.revision, revision);
+  assert.equal(store.getDatabase().prepare('SELECT title FROM series_fts').get().title, 'Alpha');
+  assert.equal(store.getDatabase().prepare('SELECT count(*) AS n FROM pages').get().n, 2);
+  await store.setTags('series/a', ['recovered']);
+  assert.equal(store.revision, revision + 1);
+});
+
+test('scan commits before queued user changes and close drains all accepted writes', async (t) => {
+  const { store, config, tempRoot } = await createStore('folder-library-close-drain-');
+  let reopened;
+  t.after(async () => { await store.close(); await reopened?.close(); await fs.rm(tempRoot, { recursive: true, force: true }); });
+  const scan = store.replaceLibrary(createLibrary());
+  const tags = store.setTags('series/a', ['after-scan']);
+  const progress = store.setReadProgress('series/a', { chapterId: 'chapter-1', pageIndex: 1, totalPages: 2 });
+  const close = store.close();
+  await assert.rejects(store.setTags('series/a', ['too-late']), /closing/);
+  await Promise.all([scan, tags, progress, close]);
+  reopened = new AppStore(config);
+  await reopened.init();
+  assert.deepEqual(reopened.getTags('series/a'), ['after-scan']);
+  assert.equal(reopened.getReadProgress('series/a').pageIndex, 1);
+  assert.equal(reopened.revision, 3);
+});
+
+test('scanner to store to restart retains unchanged CBZ pages when a sibling archive changes', async (t) => {
+  const { scanLibrary } = await import('../server/scanner.mjs');
+  const { store, config, tempRoot } = await createStore('folder-library-scan-store-cbz-');
+  let active = store;
+  t.after(async () => { await active.close(); await fs.rm(tempRoot, { recursive: true, force: true }); });
+  const seriesRoot = path.join(config.defaultSettings.libraryRoot, 'work');
+  await fs.mkdir(seriesRoot, { recursive: true });
+  const first = path.join(seriesRoot, '1.cbz');
+  const second = path.join(seriesRoot, '2.cbz');
+  await fs.writeFile(first, 'first archive boundary fixture');
+  await fs.writeFile(second, 'second archive boundary fixture');
+  const counts = new Map([[first, 2], [second, 1]]);
+  const indexed = [];
+  // ZIP parsing has its own integration suite; this tests scanner/store identity and persistence contracts.
+  const listArchivePages = async (sourcePath) => {
+    indexed.push(sourcePath);
+    const stat = await fs.stat(sourcePath);
+    return Array.from({ length: counts.get(sourcePath) }, (_, index) => ({
+      sourcePath, relativePath: `${index + 1}.jpg`, sizeBytes: 10, mtimeMs: stat.mtimeMs,
+      archiveEntry: { version: 1, index, name: `${index + 1}.jpg`, crc32: index,
+        compressedSize: 10, uncompressedSize: 10, compressionMethod: 0,
+        archiveIdentity: { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs } },
+    }));
+  };
+  const scan = () => scanLibrary(active.getSettings(), active.getOverridesRef(), {
+    previousLibrary: active.getLibraryRef(), listArchivePages,
+  });
+  await active.replaceLibrary(await scan());
+  const firstChapterId = active.getLibraryRef().series[0].volumes[0].chapters[0].id;
+  const firstPage = await active.queryChapterPageAsync(firstChapterId, 2);
+  await active.close();
+  active = new AppStore(config);
+  await active.init();
+  indexed.length = 0;
+  await active.replaceLibrary(await scan());
+  assert.deepEqual(indexed, []);
+  assert.deepEqual(await active.queryChapterPageAsync(firstChapterId, 2), firstPage);
+  await fs.writeFile(second, 'changed archive with three pages and a different size');
+  counts.set(second, 3);
+  await active.replaceLibrary(await scan());
+  assert.deepEqual(indexed, [second]);
+  assert.equal(active.getLibrarySummary().stats.pageCount, 5);
+  assert.deepEqual(await active.queryChapterPageAsync(firstChapterId, 2), firstPage);
+  assert.equal(active.getDatabaseWriteWorkerMetrics().lastWrite.reusedChapters, 1);
+});
+
+test('batch overrides preserve case-sensitive source identities', async (t) => {
+  const { store, tempRoot } = await createStore('folder-library-batch-identities-');
+  t.after(async () => { await store.close(); await fs.rm(tempRoot, { recursive: true, force: true }); });
+  await store.batchSetTags(['series/A', 'series/a', 'series/A'], ['tag'], { mode: 'replace' });
+  await store.batchSetCategories(['series/A', 'series/a', 'series/A'], ['category']);
+  assert.deepEqual(store.getTags('series/A'), ['tag']);
+  assert.deepEqual(store.getTags('series/a'), ['tag']);
+  assert.deepEqual(store.getOverrides().seriesCategories['series/A'], ['category']);
+  assert.deepEqual(store.getOverrides().seriesCategories['series/a'], ['category']);
+});
+
+test('catalog content revision excludes reading state but advances for feature changes and scans', async (t) => {
+  const { store, config, tempRoot } = await createStore('folder-library-content-revision-');
+  let active = store;
+  t.after(async () => { await active.close(); await fs.rm(tempRoot, { recursive: true, force: true }); });
+  const contentRevision = () => Number(active.getDatabase().prepare("SELECT value FROM app_meta WHERE key='catalog_revision'").get().value);
+  assert.equal(contentRevision(), 0);
+  await active.replaceLibrary(createLibrary());
+  assert.equal(contentRevision(), 1);
+  const globalBefore = active.revision;
+  const liveOnlyWrites = [
+    () => active.toggleFavorite('series/a'),
+    () => active.setCustomCover('series/a', 'chapter-1', 1),
+    () => active.removeCustomCover('series/a'),
+    () => active.setReadProgress('series/a', { chapterId: 'chapter-1', pageIndex: 1, totalPages: 2 }),
+    () => active.clearReadProgress('series/a'),
+    () => active.replaceSettings({ scanIntervalMinutes: 45 }),
+  ];
+  for (const write of liveOnlyWrites) {
+    await write();
+    assert.equal(contentRevision(), 1);
+  }
+  assert.equal(active.revision, globalBefore + liveOnlyWrites.length);
+  const featureWrites = [
+    () => active.setMetadata('series/a', { title: 'Updated title' }),
+    () => active.setTags('series/a', ['tag']),
+    () => active.batchSetTags(['series/a'], ['batch-tag']),
+    () => active.setMetadataAndTags('series/a', { author: 'Updated author' }, ['combined']),
+    () => active.setSeriesCategories('series/a', ['category']),
+    () => active.batchSetCategories(['series/a'], ['batch-category']),
+  ];
+  for (let index = 0; index < featureWrites.length; index += 1) {
+    await featureWrites[index]();
+    assert.equal(contentRevision(), index + 2);
+  }
+  const beforeFailedScan = contentRevision();
+  const invalid = createLibrary();
+  invalid.series[0].volumes[0].chapters[0].pages.push({ ...invalid.series[0].volumes[0].chapters[0].pages[0] });
+  await assert.rejects(active.replaceLibrary(invalid), /UNIQUE constraint/);
+  assert.equal(contentRevision(), beforeFailedScan);
+  const reused = active.getLibrary();
+  reused.series[0]._reused = true;
+  await active.replaceLibrary(reused);
+  assert.equal(contentRevision(), beforeFailedScan + 1);
+  await active.close();
+  active = new AppStore(config);
+  await active.init();
+  assert.equal(contentRevision(), beforeFailedScan + 1);
+});
+
+test('existing v6 databases seed the missing content revision without losing user data', async (t) => {
+  const { store, config, tempRoot } = await createStore('folder-library-seed-content-revision-');
+  let active = store;
+  t.after(async () => { await active.close(); await fs.rm(tempRoot, { recursive: true, force: true }); });
+  await active.replaceLibrary(createLibrary());
+  await active.setTags('series/a', ['preserved']);
+  await active.setReadProgress('series/a', { chapterId: 'chapter-1', pageIndex: 1, totalPages: 2 });
+  const revision = active.revision;
+  active.getDatabase().prepare("DELETE FROM app_meta WHERE key='catalog_revision'").run();
+  await active.close();
+  active = new AppStore(config);
+  await active.init();
+  assert.equal(Number(active.getDatabase().prepare("SELECT value FROM app_meta WHERE key='catalog_revision'").get().value), revision);
+  assert.deepEqual(active.getTags('series/a'), ['preserved']);
+  assert.equal(active.getReadProgress('series/a').pageIndex, 1);
+  assert.equal((await active.queryChapterPageAsync('chapter-1', 2)).sourcePath, '/library/series/a/2.jpg');
 });

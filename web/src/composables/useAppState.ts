@@ -118,6 +118,7 @@ let refreshInFlight: Promise<void> | null = null
 let refreshPending = false
 let refreshForceCategoryReset = false
 let listGeneration = 0
+let detailGeneration = 0
 let listInFlight: { key: string; promise: Promise<void> } | null = null
 
 async function refreshAll(forceCategoryReset = false) {
@@ -209,20 +210,28 @@ async function loadSeriesList() {
 }
 
 async function loadSeriesDetail(id: string) {
+  if (state.activeSeries?.id !== id) state.activeSeries = null
   state.activeSeriesId = id
   state.loadingDetail = true
+  await requestActiveDetail(id)
+}
+
+async function requestActiveDetail(id: string) {
+  // A generation also protects A -> B -> A and overlapping refreshes of A.
+  const generation = ++detailGeneration
+  const isCurrent = () => generation === detailGeneration && state.activeSeriesId === id
   try {
     const detail = await api.getSeriesDetail(id)
-    if (state.activeSeriesId === id) {
+    if (isCurrent()) {
       state.activeSeries = detail
     }
-  } catch {
-    if (state.activeSeriesId === id) {
+  } catch (error) {
+    if (isCurrent() && !(error instanceof Error && error.name === 'AbortError')) {
       state.activeSeriesId = null
       state.activeSeries = null
     }
   } finally {
-    if (state.activeSeriesId === id) {
+    if (generation === detailGeneration) {
       state.loadingDetail = false
     }
   }
@@ -230,12 +239,7 @@ async function loadSeriesDetail(id: string) {
 
 async function restoreActiveDetail() {
   if (!state.activeSeriesId) return
-  try {
-    state.activeSeries = await api.getSeriesDetail(state.activeSeriesId)
-  } catch {
-    state.activeSeriesId = null
-    state.activeSeries = null
-  }
+  await requestActiveDetail(state.activeSeriesId)
 }
 
 async function runScan() {
@@ -506,13 +510,21 @@ async function openSeriesDetail(id: string) {
 
 async function backToLibrary() {
   state.currentView = 'library'
+  clearActiveDetail()
+  await router.push(state.favoritesOnly ? '/favorites' : '/library')
+}
+
+function clearActiveDetail() {
+  ++detailGeneration
+  api.cancelDetailRequests()
   state.activeSeriesId = null
   state.activeSeries = null
-  await router.push(state.favoritesOnly ? '/favorites' : '/library')
+  state.loadingDetail = false
 }
 
 async function syncRouteState(route: Pick<RouteLocationNormalizedLoaded, 'name' | 'params'>) {
   if (!state.meta) await refreshAll(true)
+  if (route.name !== 'series' && state.activeSeriesId) clearActiveDetail()
   if (route.name === 'settings') {
     state.currentView = 'settings'
     return

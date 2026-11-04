@@ -2,6 +2,8 @@ import http from 'node:http';
 import path from 'node:path';
 
 import { createApp } from './app.mjs';
+import { ArchiveCache } from './archive-cache.mjs';
+import { closeArchiveIndexCache, configureArchiveIndexCache, getArchiveIndexStats } from './archive.mjs';
 import { loadConfig } from './config.mjs';
 import { createContext } from './context.mjs';
 import { LiveUpdatesHub } from './live-updates.mjs';
@@ -16,6 +18,11 @@ import { LibraryWatcher } from './watcher.mjs';
 import { ensureDir } from './utils.mjs';
 
 const config = loadConfig();
+// 保留足够容纳单个大型归档的索引预算；低配减少归档数和构建并发。
+await configureArchiveIndexCache({ maxBytes: 16 * 1024 * 1024,
+  maxArchives: config.resourceProfile.archiveIndexArchives,
+  maxConcurrent: Math.min(2, config.resourceProfile.thumbnailConcurrency),
+  maxQueue: config.resourceProfile.name === 'lite' ? 16 : 32 });
 await ensureDir(config.publicDir);
 await ensureDir(config.dataDir);
 
@@ -29,6 +36,13 @@ const thumbnailService = new ThumbnailService(path.join(config.dataDir, 'thumbs'
   ttlMs: config.imageCache.ttlMs,
 });
 await thumbnailService.init();
+
+// 使用同一资源档位控制解压并发，但原图缓存不能混入 thumbs 的 WebP 清理范围。
+const archiveCache = new ArchiveCache(path.join(config.dataDir, 'archive-pages'), {
+  concurrency: config.resourceProfile.thumbnailConcurrency,
+  ...config.archiveCache,
+});
+await archiveCache.init();
 
 const scanCoordinator = new ScanCoordinator(store, config);
 const liveUpdates = new LiveUpdatesHub(config.webSocket);
@@ -56,9 +70,11 @@ const ctx = createContext({
   config,
   liveUpdates,
   thumbnailService,
+  archiveCache,
   metadataJobs,
   runtimeMetrics,
 });
+ctx.archiveIndexCache = { close: closeArchiveIndexCache, getStats: getArchiveIndexStats };
 
 scanCoordinator.setContext(ctx);
 

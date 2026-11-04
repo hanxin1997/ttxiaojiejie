@@ -180,8 +180,15 @@
         </n-card>
 
         <div class="volume-stack">
+          <n-pagination
+            v-if="state.activeSeries.volumes.length > 1"
+            v-model:page="volumePage"
+            :page-count="state.activeSeries.volumes.length"
+            :page-slot="5"
+            show-quick-jumper
+          />
           <VolumeCard
-            v-for="volume in state.activeSeries.volumes"
+            v-for="volume in visibleVolumes"
             :key="volume.id"
             :volume="volume"
             @open-chapter="openChapter"
@@ -205,7 +212,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import {
   NButton,
   NCard,
@@ -216,6 +223,7 @@ import {
   NIcon,
   NImage,
   NInput,
+  NPagination,
   NSpin,
   NTag,
   NText,
@@ -256,8 +264,18 @@ const viewerVisible = ref(false)
 const viewerTitle = ref('')
 const viewerPageUrls = ref<string[]>([])
 const viewerChapterId = ref('')
+const viewerSeriesId = ref('')
 const viewerInitialIndex = ref(0)
 let chapterRequestGeneration = 0
+let metadataGeneration = 0
+let recommendationGeneration = 0
+let disposed = false
+const volumePage = ref(1)
+// Only mount one volume and one page of chapters, regardless of library size.
+const visibleVolumes = computed(() => state.activeSeries?.volumes.slice(volumePage.value - 1, volumePage.value) ?? [])
+watch(() => state.activeSeries?.volumes.length ?? 0, (length) => {
+  volumePage.value = Math.min(volumePage.value, Math.max(1, length))
+})
 
 const tagTypes = ['success', 'info', 'warning', 'error', 'default'] as const
 
@@ -268,26 +286,38 @@ const effectiveCategories = computed(() => {
 })
 
 async function loadMetadataEditor(seriesId: string) {
+  const generation = ++metadataGeneration
   const payload = await api.getSeriesMetadata(seriesId)
+  if (disposed || generation !== metadataGeneration || state.activeSeriesId !== seriesId) return
   metaTitle.value = payload.override.title ?? ''
   metaAuthor.value = payload.override.author ?? ''
   metaDescription.value = payload.override.description ?? ''
 }
 
 async function loadRecommendations(seriesId: string) {
+  const generation = ++recommendationGeneration
+  const isCurrent = () => !disposed && generation === recommendationGeneration && state.activeSeriesId === seriesId
   loadingRecommendations.value = true
   try {
-    recommendations.value = (await api.getSeriesRecommendations(seriesId)).items
+    const payload = await api.getSeriesRecommendations(seriesId)
+    if (isCurrent()) recommendations.value = payload.items
   } catch {
-    recommendations.value = []
+    if (isCurrent()) recommendations.value = []
   } finally {
-    loadingRecommendations.value = false
+    if (isCurrent()) loadingRecommendations.value = false
   }
 }
 
 watch(
   () => state.activeSeries?.id,
   (seriesId) => {
+    ++chapterRequestGeneration
+    ++metadataGeneration
+    ++recommendationGeneration
+    viewerVisible.value = false
+    volumePage.value = 1
+    recommendations.value = []
+    loadingRecommendations.value = false
     if (!seriesId || !state.activeSeries) {
       recommendations.value = []
       return
@@ -302,8 +332,15 @@ watch(
     loadMetadataEditor(seriesId).catch(() => {})
     loadRecommendations(seriesId).catch(() => {})
   },
-  { immediate: true },
+  { immediate: true, flush: 'sync' },
 )
+
+onUnmounted(() => {
+  disposed = true
+  ++chapterRequestGeneration
+  ++metadataGeneration
+  ++recommendationGeneration
+})
 
 async function handleSaveCategories() {
   if (!state.activeSeries) return
@@ -375,15 +412,18 @@ async function handleRemoveTag(tag: string) {
 
 async function handleSaveMetadata() {
   if (!state.activeSeries) return
+  const seriesId = state.activeSeries.id
   savingMeta.value = true
   try {
-    await api.setSeriesMetadata(state.activeSeries.id, {
+    await api.setSeriesMetadata(seriesId, {
       title: metaTitle.value || undefined,
       author: metaAuthor.value || undefined,
       description: metaDescription.value || undefined,
     })
-    await restoreActiveDetail()
-    await loadRecommendations(state.activeSeries.id)
+    if (state.activeSeriesId === seriesId) {
+      await restoreActiveDetail()
+      await loadRecommendations(seriesId)
+    }
     message.success('元数据已保存')
   } catch (error: any) {
     message.error(error?.message || '元数据保存失败')
@@ -402,10 +442,12 @@ async function handleOpenRecommendation(seriesId: string) {
 
 async function openChapter(chapter: ChapterDto) {
   const generation = ++chapterRequestGeneration
+  const seriesId = state.activeSeriesId
   try {
     const payload = await api.getChapterPages(chapter.id)
-    if (generation !== chapterRequestGeneration || !state.activeSeries) return
+    if (disposed || generation !== chapterRequestGeneration || state.activeSeriesId !== seriesId || !state.activeSeries) return
     viewerChapterId.value = chapter.id
+    viewerSeriesId.value = seriesId ?? ''
     viewerTitle.value = chapter.title
     viewerPageUrls.value = Array.from({ length: payload.pageCount }, (_, index) => {
       return payload.urlTemplate.replace('{pageIndex}', String(index + 1))
@@ -416,7 +458,9 @@ async function openChapter(chapter: ChapterDto) {
       : 0
     viewerVisible.value = payload.pageCount > 0
   } catch (error: any) {
-    message.error(error?.message || '章节页面加载失败')
+    if (!disposed && generation === chapterRequestGeneration && state.activeSeriesId === seriesId && error?.name !== 'AbortError') {
+      message.error(error?.message || '章节页面加载失败')
+    }
   }
 }
 
@@ -432,9 +476,9 @@ async function handleSetViewerCover(chapterId: string, pageIndex: number) {
 }
 
 async function handleViewerProgress(chapterId: string, pageIndex: number, totalPages: number) {
-  if (!state.activeSeries) return
+  if (!viewerSeriesId.value) return
   try {
-    await saveReadProgress(state.activeSeries.id, chapterId, pageIndex, totalPages)
+    await saveReadProgress(viewerSeriesId.value, chapterId, pageIndex, totalPages)
   } catch {
     // 阅读过程中的进度写入失败不打断查看。
   }

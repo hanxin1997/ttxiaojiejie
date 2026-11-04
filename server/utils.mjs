@@ -17,6 +17,9 @@ export const IMAGE_EXTENSIONS = new Set([
   '.avif',
 ]);
 
+// Archive containers are indexed separately from loose images and never treated as pages.
+export const ARCHIVE_EXTENSIONS = new Set(['.cbz']);
+
 export function naturalCompare(left, right) {
   return collator.compare(left, right);
 }

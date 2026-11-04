@@ -33,6 +33,13 @@ export function loadConfig() {
       maxQueue: Math.max(parseInteger(process.env.IMAGE_CACHE_MAX_QUEUE, 128), 1),
       ttlMs: Math.max(parseInteger(process.env.IMAGE_CACHE_TTL_HOURS, 168), 1) * 60 * 60 * 1000,
     },
+    // 归档原图与 WebP 变体分别限额，避免一个缓存的清理影响另一个。
+    archiveCache: {
+      maxBytes: Math.max(parseInteger(process.env.ARCHIVE_CACHE_MAX_MB, 512), 32) * 1024 * 1024,
+      maxQueue: Math.max(parseInteger(process.env.ARCHIVE_CACHE_MAX_QUEUE, 128), 1),
+      ttlMs: Math.max(parseInteger(process.env.ARCHIVE_CACHE_TTL_HOURS, 168), 1) * 60 * 60 * 1000,
+      maxPageBytes: Math.max(parseInteger(process.env.ARCHIVE_MAX_PAGE_MB, 64), 1) * 1024 * 1024,
+    },
     webSocket: {
       maxFrameBytes: Math.max(parseInteger(process.env.WS_MAX_FRAME_KB, 1024), 16) * 1024,
       maxBufferedBytes: Math.max(parseInteger(process.env.WS_MAX_BUFFER_KB, 2048), 32) * 1024,

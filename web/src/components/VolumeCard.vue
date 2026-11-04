@@ -5,7 +5,7 @@
     </template>
 
     <div class="chapter-list">
-      <div v-for="chapter in volume.chapters" :key="chapter.id" class="chapter-row">
+      <div v-for="chapter in visibleChapters" :key="chapter.id" class="chapter-row">
         <div class="chapter-info">
           <div class="chapter-title">
             <n-text strong style="font-size: 14px">{{ chapter.title }}</n-text>
@@ -45,19 +45,36 @@
           </n-button>
         </n-space>
       </div>
+      <n-pagination
+        v-if="volume.chapters.length > CHAPTERS_PER_PAGE"
+        v-model:page="chapterPage"
+        :page-count="Math.ceil(volume.chapters.length / CHAPTERS_PER_PAGE)"
+        :page-slot="5"
+        show-quick-jumper
+      />
     </div>
   </n-card>
 </template>
 
 <script setup lang="ts">
-import { NButton, NCard, NSpace, NTag, NText } from 'naive-ui'
+import { computed, ref, watch } from 'vue'
+import { NButton, NCard, NPagination, NSpace, NTag, NText } from 'naive-ui'
 import type { ChapterDto, VolumeDto } from '../api'
 import { useAppState } from '../composables/useAppState'
 
-defineProps<{ volume: VolumeDto }>()
+const props = defineProps<{ volume: VolumeDto }>()
 defineEmits<{ 'open-chapter': [chapter: ChapterDto] }>()
 
 const { state } = useAppState()
+const CHAPTERS_PER_PAGE = 25
+const chapterPage = ref(1)
+const visibleChapters = computed(() => props.volume.chapters.slice(
+  (chapterPage.value - 1) * CHAPTERS_PER_PAGE, chapterPage.value * CHAPTERS_PER_PAGE,
+))
+watch(() => props.volume.id, () => { chapterPage.value = 1 })
+watch(() => props.volume.chapters.length, (length) => {
+  chapterPage.value = Math.min(chapterPage.value, Math.max(1, Math.ceil(length / CHAPTERS_PER_PAGE)))
+})
 
 function getChapterProgress(chapter: ChapterDto) {
   const progress = state.activeSeries?.readProgress

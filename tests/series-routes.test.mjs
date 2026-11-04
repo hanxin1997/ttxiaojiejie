@@ -106,6 +106,18 @@ function createCtx(seriesList) {
   };
 }
 
+test('series projection falls back when an old cover chapter or progress page no longer exists', () => {
+  const series = createSeries('1', 'Comic');
+  series.cover = { sourcePath: '/library/Comic/cover.jpg' };
+  const ctx = createCtx([series]);
+  ctx.store.getCustomCover = () => ({ chapterId: 'removed-image-chapter', pageIndex: 1 });
+  ctx.store.getReadProgress = () => ({ chapterId: 'chap-1', pageIndex: 2, totalPages: 2 });
+  const item = buildSeriesListItem(series, ctx.store);
+  assert.equal(item.coverUrl, '/media/cover/1');
+  assert.equal(item.readProgress, null);
+  assert.equal(item.readStatus, 'unread');
+});
+
 async function callRoute(router, method, pathname, query = {}) {
   const matched = router.match(method, pathname);
   assert.ok(matched);

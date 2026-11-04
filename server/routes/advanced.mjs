@@ -43,15 +43,17 @@ function detectDuplicates(seriesList) {
     });
   }
 
+  // 同标题组已占用的作品只收集一次，避免每个尺寸组再次展开全部已有组。
+  const existingIds = new Set(groups.flatMap((group) => group.items.map((item) => item.id)));
   for (const items of sizeMap.values()) {
     if (items.length <= 1) {
       continue;
     }
 
-    const existingIds = new Set(groups.flatMap((group) => group.items.map((item) => item.id)));
     const filtered = items.filter((item) => !existingIds.has(item.id));
     if (filtered.length > 1) {
       groups.push({ reason: 'same_size_and_pages', items: filtered });
+      for (const item of filtered) existingIds.add(item.id);
     }
   }
 
@@ -72,8 +74,11 @@ export function registerAdvancedRoutes(router, ctx) {
     });
   });
 
-  router.get('/api/duplicates', (_req, _res, { respond }) => {
-    respond(200, { groups: detectDuplicates(store.getLibrary().series) });
+  router.get('/api/duplicates', async (_req, _res, { respond }) => {
+    const groups = store.queryCatalogOperationAsync
+      ? await store.queryCatalogOperationAsync('duplicates', {})
+      : detectDuplicates(store.getLibraryRef?.().series ?? store.getLibrary().series);
+    respond(200, { groups });
   });
 
   router.get('/api/watcher', (_req, _res, { respond }) => {

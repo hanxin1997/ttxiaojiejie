@@ -2,6 +2,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { DatabaseSync } from 'node:sqlite';
 
 import { normalizeArray } from './utils.mjs';
+import { CatalogQueries } from './catalog-queries.mjs';
 
 function parseJson(value, fallback) {
   if (typeof value !== 'string') return fallback;
@@ -22,6 +23,10 @@ function querySeriesPage(db, query, { page, pageSize }) {
   if (query.seriesId) {
     conditions.push('s.id = ?');
     parameters.push(String(query.seriesId));
+  }
+  if (Array.isArray(query.seriesIds)) {
+    conditions.push(`s.id IN (${query.seriesIds.map(() => '?').join(',') || 'NULL'})`);
+    parameters.push(...query.seriesIds);
   }
 
   if (search) {
@@ -61,8 +66,8 @@ function querySeriesPage(db, query, { page, pageSize }) {
 
   const readStatusFilter = String(query.readStatus ?? '').trim();
   if (readStatusFilter === 'unread') conditions.push('rp.source_key IS NULL');
-  else if (readStatusFilter === 'completed') conditions.push('rp.total_pages > 0 AND rp.page_index >= rp.total_pages');
-  else if (readStatusFilter === 'reading') conditions.push('rp.source_key IS NOT NULL AND (rp.total_pages <= 0 OR rp.page_index < rp.total_pages)');
+  else if (readStatusFilter === 'completed') conditions.push('rp.page_index >= progress_chapter.page_count');
+  else if (readStatusFilter === 'reading') conditions.push('rp.page_index < progress_chapter.page_count');
 
   const whereSql = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
   const sortExpression = {
@@ -76,10 +81,17 @@ function querySeriesPage(db, query, { page, pageSize }) {
   const sortOrder = query.order === 'desc' ? 'DESC' : 'ASC';
   const joins = `
     LEFT JOIN series_metadata sm ON sm.source_key = s.source_key
-    LEFT JOIN read_progress rp ON rp.source_key = s.source_key
+    LEFT JOIN read_progress rp ON rp.source_key = s.source_key AND EXISTS (
+      SELECT 1 FROM chapters c WHERE c.id = rp.chapter_id AND c.series_id = s.id
+        AND rp.page_index BETWEEN 1 AND c.page_count
+    )
+    LEFT JOIN chapters progress_chapter ON progress_chapter.id = rp.chapter_id
   `;
 
-  const total = db.prepare(`SELECT count(*) AS count FROM series s ${joins} ${whereSql}`).get(...parameters).count;
+  // 没有阅读状态过滤时计数无需元数据/进度 JOIN；避免每次分页遍历无关表。
+  const countJoins = ['unread', 'reading', 'completed'].includes(readStatusFilter)
+    ? joins.replace('LEFT JOIN series_metadata sm ON sm.source_key = s.source_key', '') : '';
+  const total = db.prepare(`SELECT count(*) AS count FROM series s ${countJoins} ${whereSql}`).get(...parameters).count;
   const rows = db.prepare(`
     SELECT
       s.*,
@@ -88,12 +100,16 @@ function querySeriesPage(db, query, { page, pageSize }) {
       sm.description AS override_description,
       rp.chapter_id AS progress_chapter_id,
       rp.page_index AS progress_page_index,
-      rp.total_pages AS progress_total_pages,
+      progress_chapter.page_count AS progress_total_pages,
       rp.updated_at AS progress_updated_at,
       EXISTS(SELECT 1 FROM favorites f WHERE f.source_key = s.source_key) AS favorite,
       (SELECT CASE WHEN v.synthetic = 1 OR v.title = '' THEN c.title ELSE v.title || ' / ' || c.title END
        FROM chapters c JOIN volumes v ON v.id = c.volume_id
-       WHERE c.series_id = s.id ORDER BY v.position DESC, c.position DESC LIMIT 1) AS latest_chapter_title
+       WHERE c.volume_id = (
+         SELECT latest.id FROM volumes latest WHERE latest.series_id = s.id AND EXISTS (
+           SELECT 1 FROM chapters available WHERE available.volume_id = latest.id
+         ) ORDER BY latest.position DESC LIMIT 1
+       ) ORDER BY c.position DESC LIMIT 1) AS latest_chapter_title
     FROM series s
     ${joins}
     ${whereSql}
@@ -104,7 +120,13 @@ function querySeriesPage(db, query, { page, pageSize }) {
   const categories = db.prepare('SELECT kind, value FROM series_categories WHERE series_id = ? ORDER BY kind, position');
   const manualCategories = db.prepare('SELECT value FROM series_category_overrides WHERE source_key = ? ORDER BY position');
   const tags = db.prepare('SELECT value FROM series_tags WHERE source_key = ? ORDER BY value COLLATE NOCASE');
-  const customCover = db.prepare('SELECT chapter_id, page_index FROM custom_covers WHERE source_key = ?');
+  // 覆盖数据不会随重新扫描删除，但它引用的章节必须仍然属于此作品。
+  const customCover = db.prepare(`
+    SELECT cc.chapter_id, cc.page_index FROM custom_covers cc
+    JOIN series s ON s.source_key = cc.source_key
+    JOIN chapters c ON c.id = cc.chapter_id AND c.series_id = s.id
+    WHERE cc.source_key = ? AND cc.page_index BETWEEN 1 AND c.page_count
+  `);
 
   const items = rows.map((row) => {
     const auto = [];
@@ -200,13 +222,15 @@ function queryChapterPages(db, chapterId) {
 }
 
 function queryCoverPath(db, seriesId) {
-  const row = db.prepare('SELECT cover_source_path FROM series WHERE id = ?').get(seriesId);
-  return row?.cover_source_path ? { sourcePath: row.cover_source_path } : null;
+  const row = db.prepare('SELECT cover_source_path, cover_archive_entry_json FROM series WHERE id = ?').get(seriesId);
+  return row?.cover_source_path
+    ? { sourcePath: row.cover_source_path, archiveEntry: parseJson(row.cover_archive_entry_json, null) }
+    : null;
 }
 
 function queryChapterPage(db, chapterId, pageIndex) {
   const row = db.prepare(`
-    SELECT position, source_path, size_bytes, mtime_ms
+    SELECT position, source_path, size_bytes, mtime_ms, archive_entry_json
     FROM pages WHERE chapter_id = ? AND position = ?
   `).get(chapterId, pageIndex);
   if (!row) return null;
@@ -215,24 +239,33 @@ function queryChapterPage(db, chapterId, pageIndex) {
     sourcePath: row.source_path,
     sizeBytes: row.size_bytes,
     mtimeMs: row.mtime_ms,
+    archiveEntry: parseJson(row.archive_entry_json, null),
   };
 }
 
 const db = new DatabaseSync(workerData.databaseFile);
 db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;');
+const catalog = new CatalogQueries(db, querySeriesPage);
 
 parentPort.on('message', ({ id, operation, payload }) => {
   try {
+    // 一次响应的统计、投影及 revision 来自同一个 WAL 读快照。
+    db.exec('BEGIN');
     let result;
     if (operation === 'series-page') result = querySeriesPage(db, payload.query, payload.pagination);
     else if (operation === 'series-detail') result = querySeriesDetail(db, payload.seriesId);
     else if (operation === 'chapter-pages') result = queryChapterPages(db, payload.chapterId);
     else if (operation === 'cover-path') result = queryCoverPath(db, payload.seriesId);
     else if (operation === 'chapter-page') result = queryChapterPage(db, payload.chapterId, payload.pageIndex);
+    else if (operation === 'opds-page') result = catalog.opds(payload);
+    else if (operation === 'recommendations') result = catalog.recommendations(payload);
+    else if (operation === 'duplicates') result = catalog.duplicates();
     else if (operation === 'ping') result = { ok: true };
     else throw new Error(`Unknown database worker operation: ${operation}`);
+    db.exec('COMMIT');
     parentPort.postMessage({ id, result });
   } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* BEGIN 失败时可能尚无事务。 */ }
     parentPort.postMessage({ id, error: { message: error.message, code: error.code ?? null } });
   }
 });

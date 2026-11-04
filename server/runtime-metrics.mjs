@@ -1,7 +1,18 @@
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { getArchiveIndexStats } from './archive.mjs';
 
 function nanosecondsToMilliseconds(value) {
   return Number.isFinite(value) ? Math.round((value / 1e6) * 1000) / 1000 : 0;
+}
+
+async function readCacheStats(cache) {
+  if (!cache?.getStats) return { available: false };
+  try {
+    return await cache.getStats();
+  } catch (error) {
+    // 某个缓存的磁盘统计失败，不应让整个运行状态接口不可用。
+    return { error: error.message };
+  }
 }
 
 export class RuntimeMetrics {
@@ -12,9 +23,10 @@ export class RuntimeMetrics {
 
   async snapshot(ctx) {
     const memory = process.memoryUsage();
-    const imageCache = ctx.thumbnailService?.getStats
-      ? await ctx.thumbnailService.getStats().catch((error) => ({ error: error.message }))
-      : { available: false };
+    const [imageCache, archiveCache] = await Promise.all([
+      readCacheStats(ctx.thumbnailService),
+      readCacheStats(ctx.archiveCache),
+    ]);
 
     return {
       at: new Date().toISOString(),
@@ -32,11 +44,14 @@ export class RuntimeMetrics {
         maxMs: nanosecondsToMilliseconds(this.eventLoop.max),
       },
       database: ctx.store.getDatabaseWorkerMetrics?.() ?? {},
+      databaseWrite: ctx.store.getDatabaseWriteWorkerMetrics?.() ?? {},
       scan: {
         status: ctx.scanCoordinator.getStatus(),
         progress: ctx.scanCoordinator.getProgress(),
       },
       imageCache,
+      archiveCache,
+      archiveIndex: getArchiveIndexStats(),
       metadata: ctx.metadataJobs?.getMetrics?.() ?? { active: 0, queued: 0 },
       websocket: { clients: ctx.liveUpdates?.getClientCount?.() ?? 0 },
       watcher: ctx.watcher?.getStatus?.() ?? null,

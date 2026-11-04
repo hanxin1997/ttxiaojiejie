@@ -12,7 +12,8 @@
     </template>
 
     <n-text depth="3" style="display: block; margin-bottom: 12px; font-size: 12px; line-height: 1.6">
-      每个分类绑定一个目录，扫描时自动递归查找包含图片的叶子目录作为独立漫画。
+      每个分类绑定一个目录，扫描时递归查找包含图片或 CBZ 的漫画目录。
+      每个 CBZ 作为一章，外置封面不计入 CBZ 正文。
       保存后，该目录下扫描出的漫画会自动归入对应分类。
     </n-text>
 

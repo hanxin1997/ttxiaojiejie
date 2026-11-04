@@ -41,9 +41,9 @@ function intersect(left, right) {
   return shared.sort(naturalCompare);
 }
 
-function scoreCandidate(targetSeries, candidateSeries, store) {
-  const target = collectSeriesFeatures(targetSeries, store);
-  const candidate = collectSeriesFeatures(candidateSeries, store);
+function scoreCandidate(targetSeries, target, candidateSeries, store, featureCache) {
+  const candidate = featureCache.get(candidateSeries.id) ?? collectSeriesFeatures(candidateSeries, store);
+  featureCache.set(candidateSeries.id, candidate);
   const reasons = [];
   let score = 0;
 
@@ -91,32 +91,35 @@ function scoreCandidate(targetSeries, candidateSeries, store) {
 }
 
 export function findSimilarSeries(library, store, seriesId, options = {}) {
-  const limit = Math.max(1, Number(options.limit) || 8);
+  const limit = Math.min(100, Math.max(1, Math.trunc(Number(options.limit)) || 8));
   const targetSeries = library.series.find((series) => series.id === seriesId);
 
   if (!targetSeries) {
     return null;
   }
 
-  return library.series
-    .filter((series) => series.id !== seriesId)
-    .map((series) => {
-      const result = scoreCandidate(targetSeries, series, store);
-      return {
-        series,
-        score: result.score,
-        reasons: result.reasons,
-      };
-    })
-    .filter((item) => item.score > 0)
-    .sort((left, right) => {
-      if (right.score !== left.score) {
-        return right.score - left.score;
-      }
-      return naturalCompare(
-        buildEffectiveTitle(left.series, store),
-        buildEffectiveTitle(right.series, store),
-      );
-    })
-    .slice(0, limit);
+  const featureCache = options.featureCache ?? new Map();
+  const target = featureCache.get(targetSeries.id) ?? collectSeriesFeatures(targetSeries, store);
+  featureCache.set(targetSeries.id, target);
+  const best = [];
+  const compare = (left, right) => right.score - left.score || naturalCompare(
+    featureCache.get(left.series.id).title, featureCache.get(right.series.id).title);
+  for (const series of library.series) {
+    if (series.id === seriesId) continue;
+    const result = scoreCandidate(targetSeries, target, series, store, featureCache);
+    if (result.score <= 0) continue;
+    const item = { series, ...result };
+    // 只保留前 K 项，等分/同标题时在已有项后插入，保持原有稳定排序。
+    if (best.length === limit && compare(item, best.at(-1)) >= 0) continue;
+    let low = 0;
+    let high = best.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (compare(item, best[middle]) < 0) high = middle;
+      else low = middle + 1;
+    }
+    best.splice(low, 0, item);
+    if (best.length > limit) best.pop();
+  }
+  return best;
 }

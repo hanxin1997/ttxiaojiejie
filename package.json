@@ -10,6 +10,8 @@
     "test": "node --test --test-isolation=none tests/*.test.mjs",
     "benchmark": "node benchmarks/catalog-benchmark.mjs",
     "benchmark:scan": "node benchmarks/scan-benchmark.mjs",
+    "benchmark:write": "node benchmarks/write-benchmark.mjs",
+    "benchmark:media": "node benchmarks/media-benchmark.mjs",
     "lint": "eslint server/ tests/",
     "lint:fix": "eslint server/ tests/ --fix",
     "format": "prettier --write server/ tests/"
@@ -18,7 +20,8 @@
     "node": ">=24.0.0"
   },
   "dependencies": {
-    "sharp": "^0.33.0"
+    "sharp": "^0.33.0",
+    "yauzl": "^3.2.0"
   },
   "devDependencies": {
     "eslint": "^9.25.0",

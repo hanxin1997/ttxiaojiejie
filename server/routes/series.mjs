@@ -9,13 +9,22 @@ function buildChapterLabel(volume, chapter) {
   return volume.synthetic || !volume.title ? chapter.title : `${volume.title} / ${chapter.title}`;
 }
 
+function validPageReference(series, reference) {
+  if (!reference || !Number.isInteger(reference.pageIndex) || reference.pageIndex < 1) return null;
+  const chapter = series.volumes.flatMap((volume) => volume.chapters)
+    .find((item) => item.id === reference.chapterId);
+  return chapter && reference.pageIndex <= chapter.pageCount
+    ? { ...reference, totalPages: chapter.pageCount }
+    : null;
+}
+
 function buildSeriesListItem(series, store) {
   const latestVolume = series.volumes.at(-1);
   const latestChapter = latestVolume?.chapters.at(-1);
-  const customCover = store.getCustomCover?.(series.sourceKey) ?? null;
+  const customCover = validPageReference(series, store.getCustomCover?.(series.sourceKey));
   const metaOverride = store.getMetadata?.(series.sourceKey) ?? null;
   const tags = store.getTags?.(series.sourceKey) ?? [];
-  const readProgress = store.getReadProgress?.(series.sourceKey) ?? null;
+  const readProgress = validPageReference(series, store.getReadProgress?.(series.sourceKey));
 
   let coverUrl = series.cover ? `/media/cover/${series.id}` : null;
   if (customCover) {
@@ -201,9 +210,14 @@ export function registerSeriesRoutes(router, ctx) {
     respond(200, payload);
   });
 
-  router.get('/api/series/:id/recommendations', (_req, _res, { params, query, respond }) => {
-    const limit = Math.max(1, Number.parseInt(query.limit ?? '8', 10) || 8);
-    const library = store.getLibrary();
+  router.get('/api/series/:id/recommendations', async (_req, _res, { params, query, respond }) => {
+    const limit = Math.min(100, Math.max(1, Number.parseInt(query.limit ?? '8', 10) || 8));
+    if (store.queryCatalogOperationAsync) {
+      const items = await store.queryCatalogOperationAsync('recommendations', { seriesId: params.id, limit });
+      respond(items ? 200 : 404, items ? { items } : { error: 'Series not found' });
+      return;
+    }
+    const library = store.getLibraryRef?.() ?? store.getLibrary();
     const result = findSimilarSeries(library, store, params.id, { limit });
 
     if (!result) {
@@ -331,7 +345,9 @@ export function registerSeriesRoutes(router, ctx) {
       return;
     }
 
-    for (const series of validSeries) {
+    if (store.batchSetTags) {
+      await store.batchSetTags(validSeries.map((series) => series.sourceKey), tags, { mode });
+    } else for (const series of validSeries) {
       if (mode === 'replace') {
         await store.setTags(series.sourceKey, tags);
       } else {

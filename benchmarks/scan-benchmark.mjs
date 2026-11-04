@@ -7,6 +7,7 @@ import { scanLibrary } from '../server/scanner.mjs';
 const SERIES_COUNT = 10_000;
 const PAGES_PER_SERIES = 100;
 const MAX_RSS_BYTES = 600 * 1024 * 1024;
+const MAX_ELAPSED_MS = 180_000;
 const virtualRoot = path.resolve(os.tmpdir(), 'folder-library-virtual-cold-scan');
 
 function entry(name, type) {
@@ -66,6 +67,8 @@ const settings = {
 let activeFileStats = 0;
 let peakFileStats = 0;
 let peakRssBytes = process.memoryUsage().rss;
+let directoryReads = 0;
+let directoryReleaseVisits = 0;
 const memorySampler = setInterval(() => {
   peakRssBytes = Math.max(peakRssBytes, process.memoryUsage().rss);
 }, 5);
@@ -76,6 +79,8 @@ const snapshot = await scanLibrary(settings, { seriesCategories: {} }, {
   filesystem,
   seriesConcurrency: 1,
   fileStatConcurrency: 16,
+  onDirectoryRead() { directoryReads += 1; },
+  onDirectoryRelease() { directoryReleaseVisits += 1; },
   onFileStatStart() {
     activeFileStats += 1;
     peakFileStats = Math.max(peakFileStats, activeFileStats);
@@ -86,10 +91,14 @@ const snapshot = await scanLibrary(settings, { seriesCategories: {} }, {
 });
 clearInterval(memorySampler);
 peakRssBytes = Math.max(peakRssBytes, process.memoryUsage().rss);
+const elapsedMs = Date.now() - startedAt;
 
 assert.equal(snapshot.stats.seriesCount, SERIES_COUNT);
 assert.equal(snapshot.stats.pageCount, SERIES_COUNT * PAGES_PER_SERIES);
 assert.ok(peakFileStats <= 16, `lite file stat concurrency ${peakFileStats} exceeds 16`);
+assert.equal(directoryReads, SERIES_COUNT + 1, 'each directory is enumerated once');
+assert.equal(directoryReleaseVisits, SERIES_COUNT, 'cache release work stays linear in works');
+assert.ok(elapsedMs <= MAX_ELAPSED_MS, `virtual cold scan took ${elapsedMs}ms, exceeds ${MAX_ELAPSED_MS}ms`);
 assert.ok(
   peakRssBytes <= MAX_RSS_BYTES,
   `cold scan peak RSS ${(peakRssBytes / 1024 / 1024).toFixed(1)}MB exceeds 600MB`,
@@ -100,5 +109,7 @@ console.log(JSON.stringify({
   pages: snapshot.stats.pageCount,
   peakRssMb: Number((peakRssBytes / 1024 / 1024).toFixed(1)),
   peakFileStats,
-  elapsedMs: Date.now() - startedAt,
+  directoryReads,
+  directoryReleaseVisits,
+  elapsedMs,
 }));

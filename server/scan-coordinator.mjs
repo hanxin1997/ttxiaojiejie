@@ -115,6 +115,8 @@ export class ScanCoordinator {
             dirtyPaths: nextDirtyPaths,
             seriesConcurrency: this.config.resourceProfile?.scanSeriesConcurrency,
             fileStatConcurrency: this.config.resourceProfile?.fileStatConcurrency,
+            // 扫描和阅读使用相同的页大小限制，避免可见章节在阅读时才被拒绝。
+            archiveOptions: { maxPageBytes: this.config.archiveCache?.maxPageBytes },
             onProgress: (progress) => {
               this.progress = progress;
               this.publishScanUpdate();

@@ -1,4 +1,5 @@
 import { buildSeriesDetail, buildSeriesListItem, findSeriesById } from './series.mjs';
+import { naturalCompare } from '../utils.mjs';
 
 const OPDS_CATALOG_TYPE = 'application/atom+xml;profile=opds-catalog;kind=navigation';
 const OPDS_ACQUISITION_TYPE = 'application/atom+xml;profile=opds-catalog;kind=acquisition';
@@ -62,8 +63,8 @@ function buildFeed({ id, title, updated, iconUrl, links = [], entries = [] }) {
 </feed>`;
 }
 
-function buildCatalogEntry(request, series, store) {
-  const item = buildSeriesListItem(series, store);
+function buildCatalogEntry(request, series, store, projected = false) {
+  const item = projected ? series : buildSeriesListItem(series, store);
   const coverUrl = item.coverUrl ? absoluteUrl(request, item.coverUrl) : null;
   const detailUrl = absoluteUrl(request, `/opds/series/${item.id}`);
   const apiUrl = absoluteUrl(request, `/api/series/${item.id}`);
@@ -103,8 +104,8 @@ function buildChapterEntry(request, chapter, sequence, title) {
 }
 
 function buildRootFeed(request, ctx) {
-  const library = ctx.store.getLibrary();
-  const updated = library.lastScanAt ?? new Date().toISOString();
+  const summary = getSummary(ctx.store);
+  const updated = summary.lastScanAt ?? new Date().toISOString();
 
   return buildFeed({
     id: absoluteUrl(request, '/opds'),
@@ -127,24 +128,39 @@ function buildRootFeed(request, ctx) {
   });
 }
 
-function buildCatalogFeed(request, ctx, query) {
-  const library = ctx.store.getLibraryRef();
+function getSummary(store) {
+  return store.getLibrarySummary?.() ?? store.getLibraryRef?.() ?? store.getLibrary();
+}
+
+const catalogCacheByContext = new WeakMap();
+
+function getCatalogCache(ctx) {
+  let cache = catalogCacheByContext.get(ctx);
+  if (!cache) {
+    cache = { revision: -1, itemPairs: [] };
+    catalogCacheByContext.set(ctx, cache);
+  }
+  const revision = getSummary(ctx.store).revision;
+  if (revision === undefined || cache.revision !== revision) {
+    const library = ctx.store.getLibraryRef();
+    cache.itemPairs = library.series.map((series) => ({
+      series,
+      item: buildSeriesListItem(series, ctx.store),
+    }));
+    cache.itemPairs.sort((left, right) =>
+      naturalCompare(left.item.title, right.item.title));
+    cache.revision = revision;
+  }
+  return cache;
+}
+
+function buildCatalogFeed(request, ctx, query, pageData = null) {
   const search = String(query.search ?? '').trim().toLowerCase();
   const pageSize = Math.min(100, Math.max(1, Number.parseInt(query.pageSize ?? '30', 10) || 30));
   const page = Math.max(1, Number.parseInt(query.page ?? '1', 10) || 1);
 
-  // 先 map 一次构建列表项，后续排序/过滤都用缓存结果
-  let itemPairs = library.series.map((series) => ({
-    series,
-    item: buildSeriesListItem(series, ctx.store),
-  }));
-
-  itemPairs.sort((left, right) => {
-    return left.item.title.localeCompare(right.item.title, 'zh-Hans-CN', {
-      numeric: true,
-      sensitivity: 'base',
-    });
-  });
+  // 目录投影和自然排序按 revision 缓存；分页请求不再重复扫描、投影和排序全库。
+  let itemPairs = pageData ? [] : getCatalogCache(ctx).itemPairs;
 
   if (search) {
     itemPairs = itemPairs.filter(({ item }) => {
@@ -156,11 +172,10 @@ function buildCatalogFeed(request, ctx, query) {
     });
   }
 
-  const total = itemPairs.length;
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const pagePairs = itemPairs.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  const updated = library.lastScanAt ?? new Date().toISOString();
+  const totalPages = pageData?.totalPages ?? Math.max(1, Math.ceil(itemPairs.length / pageSize));
+  const currentPage = pageData?.page ?? Math.min(page, totalPages);
+  const items = pageData?.items ?? itemPairs.slice((currentPage - 1) * pageSize, currentPage * pageSize).map(({ item }) => item);
+  const updated = (pageData?.lastScanAt ?? getSummary(ctx.store).lastScanAt) ?? new Date().toISOString();
 
   const queryBase = new URLSearchParams();
   if (search) {
@@ -190,7 +205,7 @@ function buildCatalogFeed(request, ctx, query) {
     title: search ? `Search results for "${search}"` : 'Library catalog',
     updated,
     links,
-    entries: pagePairs.map(({ series }) => buildCatalogEntry(request, series, ctx.store)),
+    entries: items.map((item) => buildCatalogEntry(request, item, ctx.store, true)),
   });
 }
 
@@ -201,7 +216,7 @@ function buildSeriesFeed(request, ctx, seriesId) {
   }
 
   const detail = buildSeriesDetail(series, ctx.store);
-  const updated = ctx.store.getLibrary().lastScanAt ?? new Date().toISOString();
+  const updated = getSummary(ctx.store).lastScanAt ?? new Date().toISOString();
   const chapters = detail.volumes.flatMap((volume) =>
     volume.chapters.map((chapter, index) => ({
       chapter,
@@ -249,8 +264,10 @@ export function registerOpdsRoutes(router, ctx) {
     openSearch(res, 200, buildOpenSearchDescription(req));
   });
 
-  router.get('/opds/catalog', (req, res, { query }) => {
-    xml(res, 200, buildCatalogFeed(req, ctx, query));
+  router.get('/opds/catalog', async (req, res, { query }) => {
+    const page = ctx.store.queryCatalogOperationAsync
+      ? await ctx.store.queryCatalogOperationAsync('opds-page', query) : null;
+    xml(res, 200, buildCatalogFeed(req, ctx, query, page));
   });
 
   router.get('/opds/series/:id', (req, res, { params }) => {

@@ -58,9 +58,11 @@ test('Mihon workflow pins the 1.6 build base and signs the APK with the in-repo 
   // 签名状态现在是确定的，必须硬断言——Mihon 的 ExtensionLoader 直接拒绝未签名包。
   assert.match(workflow, /name: Verify release APK signature/);
   assert.match(workflow, /\$env:APKSIGNER verify --verbose --print-certs \$env:RELEASE_APK/);
-  assert.match(workflow, /Signer #\\d\+ certificate DN: \(\.\+\)/);
-  assert.match(workflow, /\$_ -notmatch '\^CN=Folder Library'/);
-  assert.match(workflow, /::error title=Unexpected APK signer/);
+  // 工作流以固定证书指纹校验签名；DN 的打印顺序和前缀由 build-tools 决定。
+  assert.match(workflow, /SIGNING_CERT_SHA256: 70a409d14b8f6d9a7863571d6c16479d06a4c14f87852bf27341d27d2990b1f8/);
+  assert.ok(workflow.includes('certificate SHA-256 digest: ([0-9a-f]{64})'));
+  assert.match(workflow, /\$_ -ne \$env:SIGNING_CERT_SHA256/);
+  assert.match(workflow, /::error title=Release APK signature check failed:/);
   // 固定文件名会丢掉 versionCode，而 Android 拒绝降级安装，分不清版本就没法排查。
   assert.match(workflow, /"RELEASE_APK=\$collected"/);
   assert.doesNotMatch(workflow, /folder-library-1\.6-(unsigned|staging|signed)\.apk/);

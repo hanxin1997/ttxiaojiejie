@@ -1,7 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
-import path from 'node:path';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 
 import { DatabaseQueryWorker } from './database-query-worker.mjs';
+import { DatabaseWriteWorker } from './database-write-worker.mjs';
+import { createFtsWriter } from './store-fts.mjs';
 import { initializeStoreSchema } from './store-schema.mjs';
 import {
   deepClone,
@@ -131,24 +133,37 @@ function normalizeLibrary(value) {
   };
 }
 
-function createRuntimeLibrary(library) {
-  return {
-    ...library,
-    series: library.series.map((series) => {
-      const { _reused, ...runtimeSeries } = series;
-      return {
-        ...runtimeSeries,
-        volumes: (series.volumes ?? []).map((volume) => ({
-          ...volume,
-          chapters: (volume.chapters ?? []).map((chapter) => ({
-            ...chapter,
-            // 页面路径和文件身份只保存在 SQLite；媒体请求通过查询 worker 按需读取。
-            pages: [],
-          })),
-        })),
-      };
-    }),
-  };
+async function createRuntimeLibrary(library, overrides) {
+  const runtime = { ...library, series: [] };
+  const seriesIndex = new Map();
+  const seriesBySourceKey = new Map();
+  const chapterIndex = new Map();
+  const chapterOwners = new Map();
+  let work = 0;
+  for (const series of library.series) {
+    const { _reused, volumes = [], ...summary } = series;
+    const manual = [...(overrides.seriesCategories[series.sourceKey] ?? [])];
+    const item = { ...summary, categories: { ...series.categories, manual,
+      effective: normalizeArray([...(series.categories?.auto ?? []), ...(series.categories?.folder ?? []), ...manual]) }, volumes: [] };
+    runtime.series.push(item);
+    seriesIndex.set(item.id, item);
+    seriesBySourceKey.set(item.sourceKey, item);
+    for (const volume of volumes) {
+      const runtimeVolume = { ...volume, chapters: [] };
+      item.volumes.push(runtimeVolume);
+      for (const chapter of volume.chapters ?? []) {
+        const { _reused: _chapterReused, pages: _pages, ...chapterSummary } = chapter;
+        // Keep archive identity for the next scan, but retain no page arrays in the HTTP process.
+        const runtimeChapter = { ...chapterSummary, pages: [] };
+        runtimeVolume.chapters.push(runtimeChapter);
+        chapterIndex.set(chapter.id, runtimeChapter);
+        chapterOwners.set(chapter.id, series.sourceKey);
+        if (++work % 256 === 0) await yieldToEventLoop();
+      }
+    }
+    if (++work % 256 === 0) await yieldToEventLoop();
+  }
+  return { library: runtime, seriesIndex, seriesBySourceKey, chapterIndex, chapterOwners };
 }
 
 function createEmptyOverrides() {
@@ -178,8 +193,15 @@ export class AppStore {
     this.library = createEmptyLibrary();
     this.overrides = createEmptyOverrides();
     this.chapterIndex = new Map();
+    this.chapterOwners = new Map();
+    this.seriesIndex = new Map();
+    this.seriesBySourceKey = new Map();
     this.writePromise = Promise.resolve();
     this.queryWorker = null;
+    this.writeWorker = null;
+    this.ftsWriter = null;
+    this.closing = false;
+    this.closePromise = null;
     this.revision = 0;
   }
 
@@ -192,6 +214,7 @@ export class AppStore {
     await ensureDir(this.config.dataDir);
     this.db = new DatabaseSync(this.config.databaseFile);
     initializeStoreSchema(this.db);
+    this.ftsWriter = createFtsWriter(this.db);
     this.revision = this.#readRevisionSync();
     this.overrides = this.#loadOverrides();
     this.settings = this.#loadSettings();
@@ -200,13 +223,23 @@ export class AppStore {
     this.queryWorker = new DatabaseQueryWorker(this.config.databaseFile, {
       maxQueue: this.config.resourceProfile?.databaseQueueLimit ?? 64,
     });
+    this.writeWorker = new DatabaseWriteWorker(this.config.databaseFile);
   }
 
   async close() {
-    await this.queryWorker?.close();
-    this.queryWorker = null;
-    this.db?.close();
-    this.db = null;
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
+    this.closePromise = (async () => {
+      // All accepted writes finish before their connections disappear; later callers are rejected.
+      await this.writePromise;
+      await this.writeWorker?.close();
+      await this.queryWorker?.close();
+      this.writeWorker = null;
+      this.queryWorker = null;
+      this.db?.close();
+      this.db = null;
+    })();
+    return this.closePromise;
   }
 
   #loadSettings() {
@@ -290,7 +323,11 @@ export class AppStore {
         tags: parseJson(row.tags_json, []),
         categories: { auto: [], folder: [], manual, effective: [...manual] },
         cover: row.cover_source_path
-          ? { sourcePath: row.cover_source_path, fileName: row.cover_file_name }
+          ? {
+              sourcePath: row.cover_source_path,
+              fileName: row.cover_file_name,
+              archiveEntry: parseJson(row.cover_archive_entry_json, null),
+            }
           : null,
         counts: {
           volumes: row.volume_count,
@@ -335,6 +372,8 @@ export class AppStore {
         volumeTitle: row.volume_title,
         pageCount: row.page_count,
         totalBytes: row.total_bytes,
+        archiveSource: parseJson(row.archive_source_json, null),
+        scanFingerprint: row.scan_fingerprint ?? null,
         pages: [],
       };
       chapterById.set(row.id, chapter);
@@ -359,6 +398,7 @@ export class AppStore {
   }
 
   #queueWrite(operation) {
+    if (this.closing) return Promise.reject(new Error('Store is closing'));
     const task = this.writePromise.then(operation);
     this.writePromise = task.catch(() => {});
     return task;
@@ -381,13 +421,23 @@ export class AppStore {
     ) || 0);
   }
 
-  async #queueVisibleWrite(operation) {
-    const change = await this.#queueWrite(() => this.#transaction((db) => {
-      const result = operation(db);
-      return { result, revision: this.#bumpRevisionSync(db) };
-    }));
-    this.revision = change.revision;
-    return change.result;
+  #queueVisibleWrite(operation, publish = () => {}, { catalogChanged = true } = {}) {
+    return this.#queueWrite(() => {
+      const change = this.#transaction((db) => {
+        const result = operation(db);
+        // Metadata, tags and categories feed cached catalog ordering/recommendation features.
+        // Reading progress, favorites and covers are projected live and do not invalidate them.
+        if (catalogChanged) db.prepare(`
+          UPDATE app_meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+          WHERE key = 'catalog_revision'
+        `).run();
+        return { result, revision: this.#bumpRevisionSync(db) };
+      });
+      // Publish before releasing the queue: the next mutation must see the committed overrides.
+      this.revision = change.revision;
+      publish(change.result);
+      return change.result;
+    });
   }
 
   #transaction(operation) {
@@ -461,8 +511,8 @@ export class AppStore {
 
     const readStatus = String(query.readStatus ?? '').trim();
     if (readStatus === 'unread') conditions.push('rp.source_key IS NULL');
-    else if (readStatus === 'completed') conditions.push('rp.total_pages > 0 AND rp.page_index >= rp.total_pages');
-    else if (readStatus === 'reading') conditions.push('rp.source_key IS NOT NULL AND (rp.total_pages <= 0 OR rp.page_index < rp.total_pages)');
+    else if (readStatus === 'completed') conditions.push('rp.page_index >= progress_chapter.page_count');
+    else if (readStatus === 'reading') conditions.push('rp.page_index < progress_chapter.page_count');
 
     const whereSql = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const sortExpressions = {
@@ -477,7 +527,11 @@ export class AppStore {
     const sortOrder = query.order === 'desc' ? 'DESC' : 'ASC';
     const joins = `
       LEFT JOIN series_metadata sm ON sm.source_key = s.source_key
-      LEFT JOIN read_progress rp ON rp.source_key = s.source_key
+      LEFT JOIN read_progress rp ON rp.source_key = s.source_key AND EXISTS (
+        SELECT 1 FROM chapters c WHERE c.id = rp.chapter_id AND c.series_id = s.id
+          AND rp.page_index BETWEEN 1 AND c.page_count
+      )
+      LEFT JOIN chapters progress_chapter ON progress_chapter.id = rp.chapter_id
     `;
 
     const total = db.prepare(`SELECT count(*) AS count FROM series s ${joins} ${whereSql}`).get(...parameters).count;
@@ -489,7 +543,7 @@ export class AppStore {
         sm.description AS override_description,
         rp.chapter_id AS progress_chapter_id,
         rp.page_index AS progress_page_index,
-        rp.total_pages AS progress_total_pages,
+        progress_chapter.page_count AS progress_total_pages,
         rp.updated_at AS progress_updated_at,
         EXISTS(SELECT 1 FROM favorites f WHERE f.source_key = s.source_key) AS favorite,
         (
@@ -518,7 +572,7 @@ export class AppStore {
         else folder.push(categoryRow.value);
       }
       const manual = [...(this.overrides.seriesCategories[row.source_key] ?? [])];
-      const customCover = this.overrides.customCovers[row.source_key] ?? null;
+      const customCover = this.getCustomCover(row.source_key);
       let coverUrl = row.cover_source_path ? `/media/cover/${row.id}` : null;
       if (customCover) coverUrl = `/media/chapter/${customCover.chapterId}/${customCover.pageIndex}`;
       const progress = row.progress_chapter_id
@@ -588,6 +642,14 @@ export class AppStore {
     return this.queryWorker.call('chapter-page', { chapterId, pageIndex });
   }
 
+  queryCatalogOperationAsync(operation, payload) {
+    return this.queryWorker.call(operation, payload);
+  }
+
+  getDatabaseWriteWorkerMetrics() {
+    return this.writeWorker?.getMetrics() ?? { pending: 0, active: false, completed: 0, failed: 0 };
+  }
+
   getDatabaseWorkerMetrics() {
     return this.queryWorker?.getMetrics() ?? {
       submitted: 0,
@@ -602,7 +664,8 @@ export class AppStore {
 
   async checkReady() {
     if (!this.queryWorker) throw new Error('Store not initialized');
-    return this.queryWorker.call('ping', {});
+    await Promise.all([this.queryWorker.call('ping', {}), this.writeWorker.call('ping', {})]);
+    return { ok: true };
   }
 
   getSettings() {
@@ -641,7 +704,7 @@ export class AppStore {
   }
 
   getSeriesById(seriesId) {
-    return this.library.series.find((series) => series.id === seriesId) ?? null;
+    return this.seriesIndex.get(seriesId) ?? null;
   }
 
   findChapterById(chapterId) {
@@ -654,10 +717,12 @@ export class AppStore {
   }
 
   async replaceSettings(nextSettings) {
-    const normalized = normalizeSettings(mergeSettings(this.settings, nextSettings), this.config.defaultSettings);
-    this.revision = await this.#queueWrite(() => this.#writeSettingsSync(normalized, true));
-    this.settings = normalized;
-    return this.getSettings();
+    return this.#queueWrite(() => {
+      const normalized = normalizeSettings(mergeSettings(this.settings, nextSettings), this.config.defaultSettings);
+      this.revision = this.#writeSettingsSync(normalized, true);
+      this.settings = normalized;
+      return this.getSettings();
+    });
   }
 
   async replaceCategoryFolders(categoryFolders) {
@@ -666,209 +731,35 @@ export class AppStore {
 
   async replaceLibrary(nextLibrary) {
     const library = normalizeLibrary(nextLibrary);
-    this.revision = await this.#queueWrite(() => this.#replaceLibrarySync(library));
-    this.library = createRuntimeLibrary(library);
-    this.#applyAllManualCategories();
-    this.#rebuildChapterIndex();
-    return this.getLibrarySummary();
-  }
-
-  #replaceLibrarySync(library) {
-    return this.#transaction((db) => {
-      db.exec(`
-        DELETE FROM scan_issues;
-        DELETE FROM library_state;
-        DROP TABLE IF EXISTS temp.next_series_ids;
-        CREATE TEMP TABLE next_series_ids (id TEXT PRIMARY KEY) WITHOUT ROWID;
-      `);
-      const nextSeriesIdStatement = db.prepare('INSERT INTO next_series_ids (id) VALUES (?)');
-      for (const series of library.series) nextSeriesIdStatement.run(series.id);
-      db.exec(`
-        DELETE FROM series_fts WHERE series_id NOT IN (SELECT id FROM next_series_ids);
-        DELETE FROM series WHERE id NOT IN (SELECT id FROM next_series_ids);
-        DROP TABLE next_series_ids;
-      `);
-      db.prepare(`
-        INSERT INTO library_state (
-          id, last_scan_at, scan_root, series_count, volume_count, chapter_count,
-          page_count, total_bytes, categories_json, scan_meta_json
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        library.lastScanAt,
-        library.scanRoot,
-        library.stats.seriesCount,
-        library.stats.volumeCount,
-        library.stats.chapterCount,
-        library.stats.pageCount,
-        library.stats.totalBytes,
-        JSON.stringify(library.stats.categories),
-        library.scanMeta ? JSON.stringify(library.scanMeta) : null,
-      );
-
-      const issueStatement = db.prepare('INSERT INTO scan_issues (position, message) VALUES (?, ?)');
-      library.issues.forEach((issue, index) => issueStatement.run(index, issue));
-
-      const seriesStatement = db.prepare(`
-        INSERT INTO series (
-          id, position, source_key, source_path, source_folder_name, title, author,
-          dir_mtime, scan_fingerprint, updated_at, metadata_json, tags_json,
-          cover_source_path, cover_file_name, volume_count, chapter_count, page_count, total_bytes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      const volumeStatement = db.prepare(`
-        INSERT INTO volumes (id, series_id, position, title, source_path, synthetic)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
-      const chapterStatement = db.prepare(`
-        INSERT INTO chapters (
-          id, series_id, volume_id, position, title, source_key, source_path,
-          volume_title, page_count, total_bytes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      const pageStatement = db.prepare(`
-        INSERT INTO pages (chapter_id, position, source_path, size_bytes, mtime_ms)
-        VALUES (?, ?, ?, ?, ?)
-      `);
-      const categoryStatement = db.prepare(`
-        INSERT INTO series_categories (series_id, kind, value, position) VALUES (?, ?, ?, ?)
-      `);
-      const ftsStatement = db.prepare(`
-        INSERT INTO series_fts (series_id, title, author, description, tags) VALUES (?, ?, ?, ?, ?)
-      `);
-      const existingSeriesStatement = db.prepare('SELECT id FROM series WHERE id = ? AND source_key = ?');
-      const updateSeriesStatement = db.prepare(`
-        UPDATE series SET
-          position = ?, source_path = ?, source_folder_name = ?, title = ?, author = ?,
-          dir_mtime = ?, scan_fingerprint = ?, updated_at = ?, metadata_json = ?, tags_json = ?,
-          cover_source_path = ?, cover_file_name = ?, volume_count = ?, chapter_count = ?,
-          page_count = ?, total_bytes = ?
-        WHERE id = ? AND source_key = ?
-      `);
-      const deleteSeriesStatement = db.prepare('DELETE FROM series WHERE id = ? OR source_key = ?');
-      const deleteCategoriesStatement = db.prepare('DELETE FROM series_categories WHERE series_id = ?');
-      const deleteFtsStatement = db.prepare('DELETE FROM series_fts WHERE series_id = ?');
-
-      library.series.forEach((series, seriesPosition) => {
-        const updatedAt = series.updatedAt ?? library.lastScanAt ?? new Date().toISOString();
-        const reused = Boolean(
-          series._reused && existingSeriesStatement.get(series.id, series.sourceKey),
-        );
-
-        if (reused) {
-          updateSeriesStatement.run(
-            seriesPosition,
-            series.sourcePath,
-            series.sourceFolderName ?? '',
-            series.title,
-            series.author ?? null,
-            series.dirMtime ?? null,
-            series.scanFingerprint ?? null,
-            updatedAt,
-            JSON.stringify(series.metadata ?? {}),
-            JSON.stringify(series.tags ?? []),
-            series.cover?.sourcePath ?? null,
-            series.cover?.fileName ?? null,
-            series.counts?.volumes ?? 0,
-            series.counts?.chapters ?? 0,
-            series.counts?.pages ?? 0,
-            series.totalBytes ?? 0,
-            series.id,
-            series.sourceKey,
-          );
-          deleteCategoriesStatement.run(series.id);
-        } else {
-          deleteSeriesStatement.run(series.id, series.sourceKey);
-          seriesStatement.run(
-            series.id,
-            seriesPosition,
-            series.sourceKey,
-            series.sourcePath,
-            series.sourceFolderName ?? '',
-            series.title,
-            series.author ?? null,
-            series.dirMtime ?? null,
-            series.scanFingerprint ?? null,
-            updatedAt,
-            JSON.stringify(series.metadata ?? {}),
-            JSON.stringify(series.tags ?? []),
-            series.cover?.sourcePath ?? null,
-            series.cover?.fileName ?? null,
-            series.counts?.volumes ?? 0,
-            series.counts?.chapters ?? 0,
-            series.counts?.pages ?? 0,
-            series.totalBytes ?? 0,
-          );
-        }
-
-        for (const kind of ['auto', 'folder']) {
-          normalizeArray(series.categories?.[kind]).forEach((category, index) => {
-            categoryStatement.run(series.id, kind, category, index);
-          });
-        }
-
-        if (!reused) {
-          series.volumes.forEach((volume, volumePosition) => {
-            volumeStatement.run(
-              volume.id,
-              series.id,
-              volumePosition,
-              volume.title,
-              volume.sourcePath,
-              volume.synthetic ? 1 : 0,
-            );
-            volume.chapters.forEach((chapter, chapterPosition) => {
-              const pages = chapter.pages ?? [];
-              chapterStatement.run(
-                chapter.id,
-                series.id,
-                volume.id,
-                chapterPosition,
-                chapter.title,
-                chapter.sourceKey,
-                chapter.sourcePath,
-                chapter.volumeTitle ?? volume.title,
-                chapter.pageCount ?? pages.length,
-                chapter.totalBytes ?? 0,
-              );
-              pages.forEach((page, pagePosition) => {
-                pageStatement.run(
-                  chapter.id,
-                  page.index ?? pagePosition + 1,
-                  page.sourcePath ?? path.join(chapter.sourcePath, page.relativePath),
-                  page.sizeBytes ?? 0,
-                  page.mtimeMs ?? 0,
-                );
-              });
-            });
-          });
-        }
-
-        deleteFtsStatement.run(series.id);
-        const metadata = this.overrides.metadata[series.sourceKey] ?? {};
-        const tags = this.overrides.tags[series.sourceKey] ?? series.tags ?? [];
-        ftsStatement.run(
-          series.id,
-          metadata.title ?? series.title,
-          metadata.author ?? series.author ?? '',
-          metadata.description ?? '',
-          tags.join(' '),
-        );
-      });
-      return this.#bumpRevisionSync(db);
+    return this.#queueWrite(async () => {
+      // Build the next lightweight snapshot cooperatively, then atomically publish after COMMIT.
+      const runtime = await createRuntimeLibrary(library, this.overrides);
+      const result = await this.writeWorker.replaceLibrary(library);
+      Object.assign(this, runtime);
+      this.revision = result.revision;
+      return this.getLibrarySummary();
     });
   }
 
   #rebuildChapterIndex() {
     this.chapterIndex = new Map();
+    this.chapterOwners = new Map();
+    this.seriesIndex = new Map();
+    this.seriesBySourceKey = new Map();
     for (const series of this.library.series) {
+      this.seriesIndex.set(series.id, series);
+      this.seriesBySourceKey.set(series.sourceKey, series);
       for (const volume of series.volumes ?? []) {
-        for (const chapter of volume.chapters ?? []) this.chapterIndex.set(chapter.id, chapter);
+        for (const chapter of volume.chapters ?? []) {
+          this.chapterIndex.set(chapter.id, chapter);
+          this.chapterOwners.set(chapter.id, series.sourceKey);
+        }
       }
     }
   }
 
   #applyManualCategories(sourceKey) {
-    const series = this.library.series.find((item) => item.sourceKey === sourceKey);
+    const series = this.seriesBySourceKey.get(sourceKey);
     if (!series) return;
     series.categories.manual = [...(this.overrides.seriesCategories[sourceKey] ?? [])];
     series.categories.effective = normalizeArray([
@@ -878,25 +769,23 @@ export class AppStore {
     ]);
   }
 
-  #applyAllManualCategories() {
-    for (const series of this.library.series) this.#applyManualCategories(series.sourceKey);
-  }
-
   async setSeriesCategories(sourceKey, categories) {
     const normalized = normalizeArray(categories);
     await this.#queueVisibleWrite((db) => {
       db.prepare('DELETE FROM series_category_overrides WHERE source_key = ?').run(sourceKey);
       const insert = db.prepare('INSERT INTO series_category_overrides (source_key, value, position) VALUES (?, ?, ?)');
       normalized.forEach((category, index) => insert.run(sourceKey, category, index));
+    }, () => {
+      if (normalized.length > 0) this.overrides.seriesCategories[sourceKey] = normalized;
+      else delete this.overrides.seriesCategories[sourceKey];
+      this.#applyManualCategories(sourceKey);
     });
-    if (normalized.length > 0) this.overrides.seriesCategories[sourceKey] = normalized;
-    else delete this.overrides.seriesCategories[sourceKey];
-    this.#applyManualCategories(sourceKey);
     return this.getOverrides();
   }
 
   async batchSetCategories(sourceKeys, categories) {
-    const normalizedKeys = normalizeArray(sourceKeys);
+    // Filesystem identities are case-sensitive on Linux, unlike display labels/tags.
+    const normalizedKeys = [...new Set(sourceKeys)];
     const normalizedCategories = normalizeArray(categories);
     await this.#queueVisibleWrite((db) => {
       const remove = db.prepare('DELETE FROM series_category_overrides WHERE source_key = ?');
@@ -905,24 +794,27 @@ export class AppStore {
         remove.run(sourceKey);
         normalizedCategories.forEach((category, index) => insert.run(sourceKey, category, index));
       }
+    }, () => {
+      for (const sourceKey of normalizedKeys) {
+        if (normalizedCategories.length > 0) this.overrides.seriesCategories[sourceKey] = [...normalizedCategories];
+        else delete this.overrides.seriesCategories[sourceKey];
+        this.#applyManualCategories(sourceKey);
+      }
     });
-    for (const sourceKey of normalizedKeys) {
-      if (normalizedCategories.length > 0) this.overrides.seriesCategories[sourceKey] = [...normalizedCategories];
-      else delete this.overrides.seriesCategories[sourceKey];
-      this.#applyManualCategories(sourceKey);
-    }
     return this.getOverrides();
   }
 
   async toggleFavorite(sourceKey) {
-    const favorited = !this.isFavorite(sourceKey);
+    let favorited;
     await this.#queueVisibleWrite((db) => {
+      favorited = !this.isFavorite(sourceKey);
       if (favorited) db.prepare('INSERT OR IGNORE INTO favorites (source_key) VALUES (?)').run(sourceKey);
       else db.prepare('DELETE FROM favorites WHERE source_key = ?').run(sourceKey);
-    });
-    this.overrides.favorites = favorited
-      ? normalizeArray([...this.overrides.favorites, sourceKey])
-      : this.overrides.favorites.filter((item) => item !== sourceKey);
+    }, () => {
+      this.overrides.favorites = favorited
+        ? normalizeArray([...this.overrides.favorites, sourceKey])
+        : this.overrides.favorites.filter((item) => item !== sourceKey);
+    }, { catalogChanged: false });
     return { favorited };
   }
 
@@ -935,19 +827,30 @@ export class AppStore {
     await this.#queueVisibleWrite((db) => db.prepare(`
       INSERT INTO custom_covers (source_key, chapter_id, page_index) VALUES (?, ?, ?)
       ON CONFLICT(source_key) DO UPDATE SET chapter_id = excluded.chapter_id, page_index = excluded.page_index
-    `).run(sourceKey, cover.chapterId, cover.pageIndex));
-    this.overrides.customCovers[sourceKey] = cover;
+    `).run(sourceKey, cover.chapterId, cover.pageIndex), () => {
+      this.overrides.customCovers[sourceKey] = cover;
+    }, { catalogChanged: false });
     return this.getOverrides();
   }
 
   async removeCustomCover(sourceKey) {
-    await this.#queueVisibleWrite((db) => db.prepare('DELETE FROM custom_covers WHERE source_key = ?').run(sourceKey));
-    delete this.overrides.customCovers[sourceKey];
+    await this.#queueVisibleWrite((db) => db.prepare('DELETE FROM custom_covers WHERE source_key = ?').run(sourceKey), () => {
+      delete this.overrides.customCovers[sourceKey];
+    }, { catalogChanged: false });
     return this.getOverrides();
   }
 
   getCustomCover(sourceKey) {
-    return this.overrides.customCovers[sourceKey] ?? null;
+    const cover = this.overrides.customCovers[sourceKey];
+    return this.#isValidPageReference(sourceKey, cover) ? cover : null;
+  }
+
+  #isValidPageReference(sourceKey, reference) {
+    const chapter = this.chapterIndex.get(reference?.chapterId);
+    // 重新扫描可能移除旧的封面章节；保留覆盖数据，但不要返回失效 URL。
+    return chapter && this.chapterOwners.get(chapter.id) === sourceKey &&
+      Number.isInteger(reference.pageIndex) && reference.pageIndex >= 1 &&
+      reference.pageIndex <= chapter.pageCount;
   }
 
   getMetadata(sourceKey) {
@@ -967,9 +870,10 @@ export class AppStore {
         `).run(sourceKey, metadata.title ?? null, metadata.author ?? null, metadata.description ?? null);
       }
       this.#refreshFts(db, sourceKey, metadata, this.overrides.tags[sourceKey] ?? []);
+    }, () => {
+      if (Object.keys(metadata).length > 0) this.overrides.metadata[sourceKey] = metadata;
+      else delete this.overrides.metadata[sourceKey];
     });
-    if (Object.keys(metadata).length > 0) this.overrides.metadata[sourceKey] = metadata;
-    else delete this.overrides.metadata[sourceKey];
     return metadata;
   }
 
@@ -984,23 +888,44 @@ export class AppStore {
       const insert = db.prepare('INSERT INTO series_tags (source_key, value) VALUES (?, ?)');
       for (const tag of tags) insert.run(sourceKey, tag);
       this.#refreshFts(db, sourceKey, this.overrides.metadata[sourceKey] ?? {}, tags);
+    }, () => {
+      if (tags.length > 0) this.overrides.tags[sourceKey] = tags;
+      else delete this.overrides.tags[sourceKey];
     });
-    if (tags.length > 0) this.overrides.tags[sourceKey] = tags;
-    else delete this.overrides.tags[sourceKey];
     return tags;
+  }
+
+  async batchSetTags(sourceKeys, values, { mode = 'merge' } = {}) {
+    const keys = [...new Set(sourceKeys)];
+    const requested = normalizeArray(values);
+    const changed = [];
+    await this.#queueVisibleWrite((db) => {
+      const existing = db.prepare('SELECT value FROM series_tags WHERE source_key = ? ORDER BY value COLLATE NOCASE');
+      const remove = db.prepare('DELETE FROM series_tags WHERE source_key = ?');
+      const insert = db.prepare('INSERT INTO series_tags (source_key, value) VALUES (?, ?)');
+      const metadata = db.prepare('SELECT title, author, description FROM series_metadata WHERE source_key = ?');
+      for (const sourceKey of keys) {
+        const tags = mode === 'replace' ? [...requested]
+          : normalizeArray([...existing.all(sourceKey).map((row) => row.value), ...requested]);
+        remove.run(sourceKey);
+        for (const tag of tags) insert.run(sourceKey, tag);
+        this.#refreshFts(db, sourceKey, metadata.get(sourceKey) ?? {}, tags);
+        changed.push([sourceKey, tags]);
+      }
+    }, () => {
+      for (const [sourceKey, tags] of changed) {
+        if (tags.length) this.overrides.tags[sourceKey] = tags;
+        else delete this.overrides.tags[sourceKey];
+      }
+    });
+    return { updated: changed.length };
   }
 
   #refreshFts(db, sourceKey, metadata, tags) {
     const series = db.prepare('SELECT id, title, author FROM series WHERE source_key = ?').get(sourceKey);
     if (!series) return;
-    db.prepare('DELETE FROM series_fts WHERE series_id = ?').run(series.id);
-    db.prepare('INSERT INTO series_fts (series_id, title, author, description, tags) VALUES (?, ?, ?, ?, ?)').run(
-      series.id,
-      metadata.title ?? series.title,
-      metadata.author ?? series.author ?? '',
-      metadata.description ?? '',
-      tags.join(' '),
-    );
+    this.ftsWriter.refresh(series.id, metadata.title ?? series.title, metadata.author ?? series.author,
+      metadata.description ?? '', [...tags].sort().join(' '));
   }
 
   getAllTags() {
@@ -1015,7 +940,10 @@ export class AppStore {
   }
 
   getReadProgress(sourceKey) {
-    return this.overrides.readProgress[sourceKey] ?? null;
+    const progress = this.overrides.readProgress[sourceKey];
+    return this.#isValidPageReference(sourceKey, progress)
+      ? { ...progress, totalPages: this.chapterIndex.get(progress.chapterId).pageCount }
+      : null;
   }
 
   async setReadProgress(sourceKey, value) {
@@ -1033,14 +961,16 @@ export class AppStore {
         page_index = excluded.page_index,
         total_pages = excluded.total_pages,
         updated_at = excluded.updated_at
-    `).run(sourceKey, progress.chapterId, progress.pageIndex, progress.totalPages, progress.updatedAt));
-    this.overrides.readProgress[sourceKey] = progress;
+    `).run(sourceKey, progress.chapterId, progress.pageIndex, progress.totalPages, progress.updatedAt), () => {
+      this.overrides.readProgress[sourceKey] = progress;
+    }, { catalogChanged: false });
     return deepClone(progress);
   }
 
   async clearReadProgress(sourceKey) {
-    await this.#queueVisibleWrite((db) => db.prepare('DELETE FROM read_progress WHERE source_key = ?').run(sourceKey));
-    delete this.overrides.readProgress[sourceKey];
+    await this.#queueVisibleWrite((db) => db.prepare('DELETE FROM read_progress WHERE source_key = ?').run(sourceKey), () => {
+      delete this.overrides.readProgress[sourceKey];
+    }, { catalogChanged: false });
   }
 
   async setMetadataAndTags(sourceKey, metadataValue, tagValues) {
@@ -1060,11 +990,12 @@ export class AppStore {
       const insertTag = db.prepare('INSERT INTO series_tags (source_key, value) VALUES (?, ?)');
       for (const tag of tags) insertTag.run(sourceKey, tag);
       this.#refreshFts(db, sourceKey, metadata, tags);
+    }, () => {
+      if (Object.keys(metadata).length > 0) this.overrides.metadata[sourceKey] = metadata;
+      else delete this.overrides.metadata[sourceKey];
+      if (tags.length > 0) this.overrides.tags[sourceKey] = tags;
+      else delete this.overrides.tags[sourceKey];
     });
-    if (Object.keys(metadata).length > 0) this.overrides.metadata[sourceKey] = metadata;
-    else delete this.overrides.metadata[sourceKey];
-    if (tags.length > 0) this.overrides.tags[sourceKey] = tags;
-    else delete this.overrides.tags[sourceKey];
     return { metadata: deepClone(metadata), tags: [...tags] };
   }
 

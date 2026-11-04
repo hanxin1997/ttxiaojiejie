@@ -12,6 +12,23 @@ function emptyLibrary(label) {
   };
 }
 
+test('ScanCoordinator applies the configured archive page limit during indexing', async () => {
+  let archiveOptions;
+  const coordinator = new ScanCoordinator({
+    getSettings: () => ({ scanIntervalMinutes: 0 }),
+    getOverrides: () => ({}),
+    getLibrary: () => emptyLibrary('previous'),
+    replaceLibrary: async () => {},
+  }, { archiveCache: { maxPageBytes: 1024 * 1024 } }, {
+    scanner: async (_settings, _overrides, options) => {
+      archiveOptions = options.archiveOptions;
+      return emptyLibrary('scanned');
+    },
+  });
+  await coordinator.run('manual');
+  assert.equal(archiveOptions?.maxPageBytes, 1024 * 1024);
+});
+
 test('ScanCoordinator queues one trailing scan when changes arrive during a running scan', async () => {
   let releaseFirst;
   const firstGate = new Promise((resolve) => {

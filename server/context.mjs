@@ -1,4 +1,14 @@
-export function createContext({ store, scanCoordinator, watcher, config, liveUpdates, thumbnailService, metadataJobs, runtimeMetrics }) {
+export function createContext({
+  store,
+  scanCoordinator,
+  watcher,
+  config,
+  liveUpdates,
+  thumbnailService,
+  archiveCache,
+  metadataJobs,
+  runtimeMetrics,
+}) {
   const ctx = {
     store,
     scanCoordinator,
@@ -6,6 +16,7 @@ export function createContext({ store, scanCoordinator, watcher, config, liveUpd
     config,
     liveUpdates,
     thumbnailService: thumbnailService ?? null,
+    archiveCache: archiveCache ?? null,
     metadataJobs: metadataJobs ?? null,
     runtimeMetrics: runtimeMetrics ?? null,
   };

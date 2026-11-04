@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.extension.all.folderlibrary
 
 import androidx.preference.ListPreference
+import androidx.preference.Preference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -94,7 +95,8 @@ abstract class FolderLibrary :
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val payload = api.chapterPages(chapterIdFromUrl(chapter.url))
-        return api.pageImageUrls(payload, configuredReadingMode(), configuredMonoOutput()).mapIndexed { index, imageUrl ->
+        val reading = configuredPreferences()
+        return api.pageImageUrls(payload, reading.readingMode, reading.mono).mapIndexed { index, imageUrl ->
             Page(index = index, imageUrl = imageUrl)
         }
     }
@@ -104,8 +106,24 @@ abstract class FolderLibrary :
     override fun getChapterUrl(chapter: SChapter): String = baseUrl
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        val einkPreset = preferences.getBoolean(PREF_EINK_PRESET, false)
+        SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_EINK_PRESET
+            title = "低配墨水屏预设"
+            summary = "每页 20 部作品，省流灰度图片；转换由服务端完成。关闭后恢复下方原有设置。"
+            setDefaultValue(false)
+            setOnPreferenceChangeListener { _, value ->
+                // The preset never overwrites the user's custom quality or paging choices.
+                for (preferenceKey in listOf(PREF_PAGE_SIZE, PREF_READING_MODE, PREF_MONO_OUTPUT)) {
+                    screen.findPreference<Preference>(preferenceKey)?.isEnabled = value != true
+                }
+                true
+            }
+        }.also(screen::addPreference)
+
         ListPreference(screen.context).apply {
             key = PREF_PAGE_SIZE
+            isEnabled = !einkPreset
             title = "每页作品数"
             entries = arrayOf("20（低配）", "40（推荐）", "80")
             entryValues = arrayOf("20", "40", "80")
@@ -115,6 +133,7 @@ abstract class FolderLibrary :
 
         ListPreference(screen.context).apply {
             key = PREF_READING_MODE
+            isEnabled = !einkPreset
             title = "阅读图片"
             entries = arrayOf("原图", "平衡（1600px / WebP 80）", "省流（1280px / WebP 70）")
             entryValues = arrayOf(READING_ORIGINAL, READING_BALANCED, READING_LITE)
@@ -124,6 +143,7 @@ abstract class FolderLibrary :
 
         SwitchPreferenceCompat(screen.context).apply {
             key = PREF_MONO_OUTPUT
+            isEnabled = !einkPreset
             title = "墨水屏灰度输出"
             summary = "服务端预先转灰度，设备省去实时去色开销；彩页会变黑白。"
             setDefaultValue(false)
@@ -174,18 +194,14 @@ abstract class FolderLibrary :
         }.asReversed()
     }
 
-    private fun configuredPageSize(): Int = preferences
-        .getString(PREF_PAGE_SIZE, DEFAULT_PAGE_SIZE.toString())
-        ?.toIntOrNull()
-        ?.takeIf { it in ALLOWED_PAGE_SIZES }
-        ?: DEFAULT_PAGE_SIZE
+    private fun configuredPreferences(): ReaderPreferences = resolveReaderPreferences(
+        einkPreset = preferences.getBoolean(PREF_EINK_PRESET, false),
+        savedPageSize = preferences.getString(PREF_PAGE_SIZE, DEFAULT_PAGE_SIZE.toString()),
+        savedReadingMode = preferences.getString(PREF_READING_MODE, READING_ORIGINAL),
+        savedMono = preferences.getBoolean(PREF_MONO_OUTPUT, false),
+    )
 
-    private fun configuredReadingMode(): String = preferences
-        .getString(PREF_READING_MODE, READING_ORIGINAL)
-        ?.takeIf { it in ALLOWED_READING_MODES }
-        ?: READING_ORIGINAL
-
-    private fun configuredMonoOutput(): Boolean = preferences.getBoolean(PREF_MONO_OUTPUT, false)
+    private fun configuredPageSize(): Int = configuredPreferences().pageSize
 
     private fun triggerCategoryRefresh() {
         if (!categoryRefreshInFlight.compareAndSet(false, true)) return
@@ -268,9 +284,7 @@ abstract class FolderLibrary :
 
     companion object {
         private val JSON = Json { ignoreUnknownKeys = true }
-        private val ALLOWED_PAGE_SIZES = setOf(20, 40, 80)
-        private val ALLOWED_READING_MODES = setOf(READING_ORIGINAL, READING_BALANCED, READING_LITE)
-
+        private const val PREF_EINK_PRESET = "eink_preset"
         private const val PREF_PAGE_SIZE = "page_size"
         private const val PREF_READING_MODE = "reading_mode"
         private const val PREF_MONO_OUTPUT = "mono_output"

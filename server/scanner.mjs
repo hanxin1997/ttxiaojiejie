@@ -1,8 +1,11 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 
+import { DEFAULT_ARCHIVE_LIMITS, listArchivePages } from './archive.mjs';
 import {
+  ARCHIVE_EXTENSIONS,
   IMAGE_EXTENSIONS,
   formatPageTemplate,
   naturalCompare,
@@ -11,6 +14,9 @@ import {
   stableId,
   toPosixPath,
 } from './utils.mjs';
+
+const SCAN_FINGERPRINT_PREFIX = 'cbz-v2:';
+const ARCHIVE_ISSUE_PREFIX = 'CBZ 读取失败: ';
 
 /**
  * @typedef {Object} ScanProgress
@@ -32,15 +38,45 @@ function createScanContext(options) {
 
   return {
     filesystem: options.filesystem ?? fs,
+    listArchivePages: options.listArchivePages ?? listArchivePages,
+    archiveOptions: options.archiveOptions ?? {},
+    archiveIssues: [],
     directoryFacts: new Map(),
+    directoryConsumers: new Map(),
     fileStats: new Map(),
     fileStatConcurrency,
     onDirectoryRead: options.onDirectoryRead,
     onFileStatStart: options.onFileStatStart,
     onFileStatEnd: options.onFileStatEnd,
-    releaseDirectoryTree(rootPath) {
-      for (const cachedPath of this.directoryFacts.keys()) {
-        if (isPathInside(rootPath, cachedPath)) this.directoryFacts.delete(cachedPath);
+    onDirectoryRelease: options.onDirectoryRelease,
+    async prepareDirectoryConsumers(seriesDirs) {
+      // A flat work reads its own directory and immediate children. Count those
+      // exact consumers once, including nested candidates that share a read.
+      for (const seriesDir of seriesDirs) {
+        const root = path.resolve(seriesDir);
+        const facts = await this.directoryFacts.get(root);
+        const directories = [root, ...(facts?.directoryNames ?? []).map((name) => path.join(root, name))];
+        for (const directory of directories) {
+          this.directoryConsumers.set(directory, (this.directoryConsumers.get(directory) ?? 0) + 1);
+        }
+      }
+      // Discovery can also visit empty ancestors and branches that are not works.
+      // Once consumers are known, their names no longer need to remain resident.
+      for (const directory of this.directoryFacts.keys()) {
+        if (!this.directoryConsumers.has(directory)) this.directoryFacts.delete(directory);
+      }
+    },
+    async releaseDirectoryTree(rootPath) {
+      const root = path.resolve(rootPath);
+      const facts = await this.directoryFacts.get(root);
+      for (const directory of [root, ...(facts?.directoryNames ?? []).map((name) => path.join(root, name))]) {
+        this.onDirectoryRelease?.(directory);
+        const remaining = this.directoryConsumers.get(directory) - 1;
+        if (remaining > 0) this.directoryConsumers.set(directory, remaining);
+        else {
+          this.directoryConsumers.delete(directory);
+          this.directoryFacts.delete(directory);
+        }
       }
     },
     async withFileStatSlot(task) {
@@ -72,6 +108,7 @@ async function readDirectoryFacts(dirPath, scanContext = null) {
     .readdir(resolvedPath, { withFileTypes: true })
     .then((entries) => {
       const imageNames = [];
+      const archiveNames = [];
       const directoryNames = [];
       for (const entry of entries) {
         if (entry.isDirectory()) {
@@ -81,11 +118,17 @@ async function readDirectoryFacts(dirPath, scanContext = null) {
           IMAGE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
         ) {
           imageNames.push(entry.name);
+        } else if (
+          entry.isFile() &&
+          ARCHIVE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+        ) {
+          archiveNames.push(entry.name);
         }
       }
       imageNames.sort(naturalCompare);
+      archiveNames.sort(naturalCompare);
       directoryNames.sort(naturalCompare);
-      return { imageNames, directoryNames };
+      return { imageNames, archiveNames, directoryNames };
     });
   scanContext?.directoryFacts.set(resolvedPath, task);
   return task;
@@ -132,6 +175,11 @@ async function listSubdirectories(dirPath, scanContext = null) {
 async function listImageFiles(dirPath, scanContext = null) {
   const facts = await readDirectoryFacts(dirPath, scanContext);
   return facts.imageNames.map((name) => path.join(dirPath, name));
+}
+
+async function listArchiveFiles(dirPath, scanContext) {
+  const facts = await readDirectoryFacts(dirPath, scanContext);
+  return facts.archiveNames.map((name) => path.join(dirPath, name));
 }
 
 /**
@@ -365,6 +413,68 @@ async function buildChapter({
   };
 }
 
+async function buildArchiveChapter({ archivePath, volumeTitle, seriesSourceKey, relativePath, scanContext, previousChapter }) {
+  try {
+    const id = stableId(`chapter:archive:${path.resolve(archivePath)}`);
+    const sourceKey = toPosixPath(path.join(seriesSourceKey, volumeTitle, relativePath));
+    const title = toPosixPath(relativePath.slice(0, -path.extname(relativePath).length));
+    const limits = Object.fromEntries(Object.entries(DEFAULT_ARCHIVE_LIMITS).map(([name, fallback]) => {
+      const value = Number((scanContext.archiveOptions.limits ?? scanContext.archiveOptions)[name]);
+      return [name, Number.isSafeInteger(value) && value > 0 ? value : fallback];
+    }));
+    const stats = await getFileStats(archivePath, scanContext);
+    const previousSource = previousChapter?.archiveSource;
+    if (stats?.isFile() && previousChapter?.id === id && previousChapter.sourceKey === sourceKey &&
+        previousSource?.version === 1 && previousSource.identity && previousSource.firstPage?.archiveEntry &&
+        previousChapter.scanFingerprint?.startsWith('cbz-chapter-v1:') &&
+        previousSource.identity.size === stats.size && previousSource.identity.mtimeMs === stats.mtimeMs &&
+        previousSource.identity.ctimeMs === stats.ctimeMs &&
+        JSON.stringify(previousSource.limits) === JSON.stringify(limits)) {
+      // Runtime snapshots intentionally have no pages. The writer preserves this
+      // chapter's SQLite rows; firstPage retains only what cover selection needs.
+      return { ...previousChapter, title, volumeTitle, pages: [], _reused: true };
+    }
+    const archivePages = await scanContext.listArchivePages(archivePath, scanContext.archiveOptions);
+    if (archivePages.length === 0) throw new Error('归档内没有可阅读的图片');
+    const pages = archivePages.map((page, index) => ({ ...page, index: index + 1 }));
+    const fingerprint = crypto.createHash('sha256');
+    for (const page of pages) fingerprint.update(JSON.stringify(page));
+    return {
+      id,
+      title,
+      sourcePath: archivePath,
+      sourceKey,
+      volumeTitle,
+      pageCount: pages.length,
+      totalBytes: pages.reduce((sum, page) => sum + page.sizeBytes, 0),
+      scanFingerprint: `cbz-chapter-v1:${fingerprint.digest('hex')}`,
+      archiveSource: {
+        version: 1,
+        identity: { ...pages[0].archiveEntry.archiveIdentity },
+        firstPage: pages[0],
+        latestPageMtime: pages.reduce((latest, page) => Math.max(latest, page.mtimeMs), 0),
+        limits,
+      },
+      pages,
+    };
+  } catch (error) {
+    // A damaged or unsupported archive must not discard the rest of the library.
+    scanContext.archiveIssues.push(`${ARCHIVE_ISSUE_PREFIX}${toPosixPath(archivePath)} (${error.message})`);
+    return null;
+  }
+}
+
+function selectExternalCoverImages(imagePaths, hasArchiveContext) {
+  if (!hasArchiveContext) return [];
+  const namedCovers = imagePaths.filter((imagePath) => {
+    const name = path.basename(imagePath, path.extname(imagePath));
+    return /^(cover|folder|封面)$/i.test(name);
+  });
+  // A lone accompanying image is conventionally an external cover. Other loose
+  // pages retain their existing chapter so mixed directories never lose content.
+  return namedCovers.length > 0 ? namedCovers : imagePaths.length === 1 ? imagePaths : [];
+}
+
 async function collectVolumeChapters(volumeDir, volumeTitle, settings, seriesSourceKey, scanContext) {
   const chapters = [];
   const directImages = await listImageFiles(volumeDir, scanContext);
@@ -530,14 +640,23 @@ async function scanSeries(seriesDir, libraryRoot, settings, overrides, previousS
 /**
  * Flat 模式扫描：只取目录内直接图片，生成单卷单章节的系列
  */
-function buildSeriesFingerprint(chapters) {
+function buildSeriesFingerprint(chapters, coverIdentity) {
   const hash = crypto.createHash('sha256');
+  hash.update(SCAN_FINGERPRINT_PREFIX);
   for (const chapter of chapters) {
+    hash.update(JSON.stringify([chapter.id, chapter.sourceKey, chapter.sourcePath]));
+    if (chapter.archiveSource && chapter.scanFingerprint) {
+      hash.update(chapter.scanFingerprint);
+      continue;
+    }
     for (const page of chapter.pages) {
-      hash.update(`${toPosixPath(page.relativePath)}\0${page.sizeBytes}\0${page.mtimeMs}\n`);
+      hash.update(JSON.stringify([
+        toPosixPath(page.relativePath), page.sizeBytes, page.mtimeMs, page.archiveEntry ?? null,
+      ]));
     }
   }
-  return hash.digest('hex');
+  hash.update(JSON.stringify(coverIdentity));
+  return `${SCAN_FINGERPRINT_PREFIX}${hash.digest('hex')}`;
 }
 
 function dirtyPathsIntersectSeries(seriesDir, dirtyPaths) {
@@ -561,6 +680,7 @@ async function scanSeriesFlat(
   const dirMtime = await getDirMtime(seriesDir, scanContext);
   const canReuseFlatSeries =
     previousSeries &&
+    previousSeries.scanFingerprint?.startsWith(SCAN_FINGERPRINT_PREFIX) &&
     previousSeries.counts?.volumes === 0 &&
     previousSeries.volumes?.length === 1 &&
     previousSeries.volumes[0]?.synthetic === true;
@@ -594,13 +714,15 @@ async function scanSeriesFlat(
   const manualCategories = normalizeArray(overrides.seriesCategories[seriesSourceKey]);
 
   const images = await listImageFiles(seriesDir, scanContext);
+  const archives = await listArchiveFiles(seriesDir, scanContext);
   const childDirs = await listSubdirectories(seriesDir, scanContext);
   const chapterDirEntries = [];
 
   for (const childDir of childDirs) {
     const childImages = await listImageFiles(childDir, scanContext);
-    if (childImages.length > 0) {
-      chapterDirEntries.push({ dir: childDir, images: childImages });
+    const childArchives = await listArchiveFiles(childDir, scanContext);
+    if (childImages.length > 0 || childArchives.length > 0) {
+      chapterDirEntries.push({ dir: childDir, images: childImages, archives: childArchives });
     }
   }
 
@@ -609,43 +731,60 @@ async function scanSeriesFlat(
     chapterDirEntries.map((item) => item.dir),
   );
 
-  if (images.length === 0 && !shouldGroupChildChapters) {
+  if (images.length === 0 && archives.length === 0 && !shouldGroupChildChapters) {
     return null;
   }
 
   const syntheticVolumeTitle = settings.naming.defaultVolumeName;
   const chapters = [];
+  const externalCoverPaths = [];
+  const contentDirectories = [
+    { dir: seriesDir, images, archives },
+    ...(shouldGroupChildChapters ? chapterDirEntries : []),
+  ];
+  const hasArchives = contentDirectories.some((item) => item.archives.length > 0);
+  const previousChapters = new Map((previousSeries?.volumes ?? [])
+    .flatMap((volume) => volume.chapters).map((chapter) => [chapter.sourcePath, chapter]));
 
-  if (images.length > 0) {
-    chapters.push(
-      await buildChapter({
-        chapterDir: seriesDir,
-        chapterTitle: formatPageTemplate(settings.naming.directImageChapterTemplate, images.length),
-        volumeTitle: syntheticVolumeTitle,
-        imagePaths: images,
-        seriesSourceKey,
-        relativeInsideVolume: '@root',
-        scanContext,
-      }),
-    );
-  }
+  for (const item of contentDirectories) {
+    const isRoot = item.dir === seriesDir;
+    const coverImages = selectExternalCoverImages(item.images, item.archives.length > 0 || (isRoot && hasArchives));
+    externalCoverPaths.push(...coverImages);
+    const coverSet = new Set(coverImages);
+    const bodyImages = item.images.filter((imagePath) => !coverSet.has(imagePath));
+    const chapterTitle = isRoot
+      ? formatPageTemplate(settings.naming.directImageChapterTemplate, bodyImages.length)
+      : path.basename(item.dir);
 
-  if (shouldGroupChildChapters) {
-    for (const item of chapterDirEntries) {
-      const chapterTitle = path.basename(item.dir);
+    if (bodyImages.length > 0) {
       chapters.push(
         await buildChapter({
           chapterDir: item.dir,
           chapterTitle,
           volumeTitle: syntheticVolumeTitle,
-          imagePaths: item.images,
+          imagePaths: bodyImages,
           seriesSourceKey,
-          relativeInsideVolume: chapterTitle,
+          relativeInsideVolume: isRoot ? '@root' : chapterTitle,
           scanContext,
         }),
       );
     }
+
+    for (const archivePath of item.archives) {
+      const chapter = await buildArchiveChapter({
+        archivePath,
+        volumeTitle: syntheticVolumeTitle,
+        seriesSourceKey,
+        relativePath: path.relative(seriesDir, archivePath),
+        scanContext,
+        previousChapter: previousChapters.get(archivePath),
+      });
+      if (chapter) chapters.push(chapter);
+    }
   }
+
+  // A broken archive plus a cover must not become a successful one-page comic.
+  if (chapters.length === 0) return null;
 
   const volumes = [
     {
@@ -657,15 +796,29 @@ async function scanSeriesFlat(
     },
   ];
 
-  const coverPath = chapters[0]?.pages[0]
-    ? resolvePageSourcePath(chapters[0], chapters[0].pages[0])
-    : null;
+  const firstArchiveChapter = chapters.find((chapter) => chapter.archiveSource || chapter.pages[0]?.archiveEntry);
+  const coverChapter = firstArchiveChapter ?? chapters[0];
+  const coverPage = coverChapter.archiveSource?.firstPage ?? coverChapter.pages[0];
+  const externalCoverPath = externalCoverPaths[0] ?? null;
+  const externalCoverStats = externalCoverPath ? await getFileStats(externalCoverPath, scanContext) : null;
+  const coverPath = externalCoverPath ?? coverPage.sourcePath ?? resolvePageSourcePath(coverChapter, coverPage);
+  const cover = {
+    sourcePath: coverPath,
+    fileName: externalCoverPath ? path.basename(externalCoverPath) : path.basename(coverPage.relativePath),
+    ...(!externalCoverPath && coverPage.archiveEntry ? { archiveEntry: coverPage.archiveEntry } : {}),
+  };
   const pageCount = chapters.reduce((total, chapter) => total + chapter.pageCount, 0);
   const totalBytes = chapters.reduce((total, chapter) => total + (chapter.totalBytes ?? 0), 0);
-  const scanFingerprint = buildSeriesFingerprint(chapters);
+  const scanFingerprint = buildSeriesFingerprint(chapters, {
+    ...cover,
+    sizeBytes: externalCoverStats?.size ?? coverPage.sizeBytes,
+    mtimeMs: externalCoverStats?.mtimeMs ?? coverPage.mtimeMs,
+    ctimeMs: externalCoverStats?.ctimeMs ?? null,
+  });
   const latestPageMtime = chapters.reduce((latest, chapter) => {
-    return Math.max(latest, ...chapter.pages.map((page) => page.mtimeMs));
-  }, 0);
+    if (chapter.archiveSource) return Math.max(latest, chapter.archiveSource.latestPageMtime);
+    return chapter.pages.reduce((chapterLatest, page) => Math.max(chapterLatest, page.mtimeMs), latest);
+  }, externalCoverStats?.mtimeMs ?? 0);
 
   // 周期扫描没有 dirty path 可依赖时，用文件身份指纹判断复用，避免目录
   // mtime 不变时漏掉原地替换的图片。
@@ -705,12 +858,7 @@ async function scanSeriesFlat(
       manual: manualCategories,
       effective: normalizeArray([...autoCategories, ...folderCategories, ...manualCategories]),
     },
-    cover: coverPath
-      ? {
-          sourcePath: coverPath,
-          fileName: path.basename(coverPath),
-        }
-      : null,
+    cover,
     counts: {
       volumes: 0,
       chapters: chapters.length,
@@ -816,14 +964,15 @@ async function collectFlatCandidateSeriesDirs(
     const childImageDirs = [];
     for (const childDir of childDirs) {
       const childImages = await listImageFiles(childDir, scanContext);
-      if (childImages.length > 0) {
+      const childArchives = await listArchiveFiles(childDir, scanContext);
+      if (childImages.length > 0 || childArchives.length > 0) {
         childImageDirs.push(childDir);
       }
     }
 
     const shouldGroupChildChapters = shouldGroupChildImageDirsAsChapters(dirPath, childImageDirs);
 
-    if (imageFiles.length > 0 || shouldGroupChildChapters) {
+    if (imageFiles.length > 0 || facts.archiveNames.length > 0 || shouldGroupChildChapters) {
       const resolved = path.resolve(dirPath);
       if (!seen.has(resolved)) {
         seen.add(resolved);
@@ -923,7 +1072,8 @@ function buildDirtyTraversalScope(libraryRoot, settings, previousSeries, dirtyPa
       traversalRoots.add(configuredRoot);
     } else if (
       segments.length === 1 &&
-      IMAGE_EXTENSIONS.has(path.extname(segments[0]).toLowerCase())
+      (IMAGE_EXTENSIONS.has(path.extname(segments[0]).toLowerCase()) ||
+        ARCHIVE_EXTENSIONS.has(path.extname(segments[0]).toLowerCase()))
     ) {
       traversalRoots.add(configuredRoot);
     } else {
@@ -1010,10 +1160,25 @@ export async function scanLibrary(settings, overrides, options = {}) {
     onProgress({ current: 0, total: 0, currentDir: null, phase: 'collecting' });
   }
 
-  const canUseDirtyScope = dirtyPaths.length > 0 && previousSeriesMap.size > 0;
+  // Old image-only snapshots must receive a complete discovery pass on upgrade;
+  // otherwise untouched cover-only series could remain unreadable indefinitely.
+  const canUseDirtyScope = dirtyPaths.length > 0 && previousSeriesMap.size > 0 &&
+    [...previousSeriesMap.values()].every((series) => series.scanFingerprint?.startsWith(SCAN_FINGERPRINT_PREFIX));
   const dirtyScope = canUseDirtyScope
     ? buildDirtyTraversalScope(libraryRoot, settings, previousLibrary.series, dirtyPaths)
     : null;
+  if (dirtyScope) {
+    // Issues live in the persisted snapshot, not page summaries. Keep failures
+    // outside this scan's scope until their own directory is actually rescanned.
+    for (const issue of previousLibrary.issues ?? []) {
+      if (!issue.startsWith(ARCHIVE_ISSUE_PREFIX)) continue;
+      const wasRescanned = dirtyScope.traversalRoots.some((root) => {
+        const prefix = `${ARCHIVE_ISSUE_PREFIX}${toPosixPath(path.resolve(root)).replace(/\/$/, '')}/`;
+        return issue.startsWith(prefix);
+      });
+      if (!wasRescanned) issues.push(issue);
+    }
+  }
   const seriesDirs = await collectFlatCandidateSeriesDirs(
     libraryRoot,
     settings,
@@ -1035,6 +1200,7 @@ export async function scanLibrary(settings, overrides, options = {}) {
   let reusedCount = 0;
 
   const scanFn = scanSeriesFlat;
+  await scanContext.prepareDirectoryConsumers(seriesDirs);
 
   const scanResults = await runPool(
     seriesDirs,
@@ -1063,10 +1229,13 @@ export async function scanLibrary(settings, overrides, options = {}) {
         );
       } finally {
         // 候选发现与作品解析共享一次 readdir；作品完成后即可释放其目录树缓存。
-        scanContext.releaseDirectoryTree(seriesDir);
+        await scanContext.releaseDirectoryTree(seriesDir);
       }
 
       completedCount++;
+      // Virtual/fast filesystems can otherwise keep the microtask queue occupied
+      // for an entire scan. Cooperate with HTTP, progress timers and idle GC.
+      if (completedCount % 32 === 0) await yieldToEventLoop();
       return item;
     },
     Math.max(1, Math.trunc(options.seriesConcurrency ?? 8)),
@@ -1112,7 +1281,7 @@ export async function scanLibrary(settings, overrides, options = {}) {
       categories,
     },
     series,
-    issues,
+    issues: normalizeArray([...issues, ...scanContext.archiveIssues.sort(naturalCompare)]),
     exportInfo: null,
     scanMeta: {
       reusedCount,

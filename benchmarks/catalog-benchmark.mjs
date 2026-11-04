@@ -96,5 +96,42 @@ assert.ok(p95Ms <= 200, `list p95 ${p95Ms.toFixed(2)}ms exceeds 200ms`);
 assert.ok(eventLoopP99Ms <= 50, `event-loop p99 ${eventLoopP99Ms.toFixed(2)}ms exceeds 50ms`);
 
 console.log(JSON.stringify({ series: SERIES_COUNT, pageSize: PAGE_SIZE, p95Ms, eventLoopP99Ms }));
+
+// 辅助接口也必须经过真实卷章数据；原列表基线保留，便于与历史结果比较。
+const populatedSeries = 5000;
+const chaptersPerSeries = 10;
+const volume = db.prepare('INSERT INTO volumes(id,series_id,position,title,source_path,synthetic) VALUES(?,?,0,?,?,0)');
+const chapter = db.prepare(`INSERT INTO chapters(id,series_id,volume_id,position,title,source_key,source_path,
+  volume_title,page_count,total_bytes) VALUES(?,?,?,?,?,?,?,?,20,1000)`);
+db.exec('BEGIN IMMEDIATE');
+try {
+  for (let index = 0; index < populatedSeries; index++) {
+    const id = `series-${index.toString().padStart(5, '0')}`;
+    volume.run(`v-${id}`, id, 'Vol.1', `/library/${id}`);
+    for (let position = 0; position < chaptersPerSeries; position++) {
+      chapter.run(`c-${id}-${position}`, id, `v-${id}`, position, `Chapter ${position + 1}`,
+        `${id}/${position}`, `/library/${id}/${position}`, 'Vol.1');
+    }
+  }
+  db.exec('COMMIT');
+} catch (error) { db.exec('ROLLBACK'); throw error; }
+const auxiliaryLag = monitorEventLoopDelay({ resolution: 10 });
+auxiliaryLag.enable();
+const timings = {};
+for (const [name, operation, payload] of [
+  ['opdsColdMs', 'opds-page', { pageSize: 30 }],
+  ['opdsWarmMs', 'opds-page', { page: 500, pageSize: 30 }],
+  ['recommendationsMs', 'recommendations', { seriesId: 'series-00000', limit: 8 }],
+]) {
+  const started = performance.now();
+  const result = await store.queryCatalogOperationAsync(operation, payload);
+  timings[name] = performance.now() - started;
+  assert.ok((result.items ?? result).length <= (operation === 'opds-page' ? 30 : 8));
+}
+await new Promise((resolve) => setTimeout(resolve, 25));
+auxiliaryLag.disable();
+assert.ok(auxiliaryLag.percentile(99) / 1e6 < 50, 'auxiliary catalog queries must leave HTTP responsive');
+console.log(JSON.stringify({ populatedSeries, chapters: populatedSeries * chaptersPerSeries, ...timings,
+  auxiliaryEventLoopP99Ms: auxiliaryLag.percentile(99) / 1e6 }));
 await store.close();
 await fs.rm(tempRoot, { recursive: true, force: true });

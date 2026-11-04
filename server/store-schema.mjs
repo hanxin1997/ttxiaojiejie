@@ -1,6 +1,7 @@
-export const STORE_SCHEMA_VERSION = 4;
+export const STORE_SCHEMA_VERSION = 6;
 
 const APPLICATION_TABLES = [
+  'series_fts_documents',
   'series_fts',
   'metadata_job_items',
   'metadata_jobs',
@@ -77,6 +78,7 @@ function resetSchema(db) {
         tags_json TEXT NOT NULL DEFAULT '[]',
         cover_source_path TEXT,
         cover_file_name TEXT,
+        cover_archive_entry_json TEXT,
         volume_count INTEGER NOT NULL DEFAULT 0,
         chapter_count INTEGER NOT NULL DEFAULT 0,
         page_count INTEGER NOT NULL DEFAULT 0,
@@ -97,8 +99,6 @@ function resetSchema(db) {
         UNIQUE(series_id, position)
       ) STRICT;
 
-      CREATE INDEX volumes_series_idx ON volumes(series_id, position);
-
       CREATE TABLE chapters (
         id TEXT PRIMARY KEY,
         series_id TEXT NOT NULL REFERENCES series(id) ON DELETE CASCADE,
@@ -110,11 +110,12 @@ function resetSchema(db) {
         volume_title TEXT NOT NULL,
         page_count INTEGER NOT NULL DEFAULT 0,
         total_bytes INTEGER NOT NULL DEFAULT 0,
+        archive_source_json TEXT,
+        scan_fingerprint TEXT,
         UNIQUE(volume_id, position)
       ) STRICT;
 
       CREATE INDEX chapters_series_idx ON chapters(series_id, position);
-      CREATE INDEX chapters_volume_idx ON chapters(volume_id, position);
 
       CREATE TABLE pages (
         chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
@@ -122,10 +123,9 @@ function resetSchema(db) {
         source_path TEXT NOT NULL,
         size_bytes INTEGER NOT NULL DEFAULT 0,
         mtime_ms REAL NOT NULL DEFAULT 0,
+        archive_entry_json TEXT,
         PRIMARY KEY(chapter_id, position)
       ) STRICT;
-
-      CREATE INDEX pages_chapter_idx ON pages(chapter_id, position);
 
       CREATE TABLE series_categories (
         series_id TEXT NOT NULL REFERENCES series(id) ON DELETE CASCADE,
@@ -222,6 +222,12 @@ function resetSchema(db) {
         tags,
         tokenize = 'unicode61'
       );
+
+      CREATE TABLE series_fts_documents (
+        document_id INTEGER PRIMARY KEY,
+        series_id TEXT NOT NULL UNIQUE,
+        content_json TEXT NOT NULL
+      ) STRICT;
     `);
 
     db.prepare('INSERT INTO app_meta (key, value) VALUES (?, ?)').run(
@@ -229,6 +235,40 @@ function resetSchema(db) {
       String(STORE_SCHEMA_VERSION),
     );
     db.prepare('INSERT INTO app_meta (key, value) VALUES (?, ?)').run('revision', '0');
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function migratePerformanceSchema(db, version) {
+  // v4/v5 都已保存用户数据。只增列/映射和删除冗余索引，绝不重建目录。
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const addColumn = (table, column) => {
+      const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+      if (!columns.some((item) => item.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
+    };
+    if (version === 4) {
+      addColumn('series', 'cover_archive_entry_json');
+      addColumn('pages', 'archive_entry_json');
+    }
+    addColumn('chapters', 'archive_source_json');
+    addColumn('chapters', 'scan_fingerprint');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS series_fts_documents (
+        document_id INTEGER PRIMARY KEY,
+        series_id TEXT NOT NULL UNIQUE,
+        content_json TEXT NOT NULL
+      ) STRICT;
+      INSERT OR IGNORE INTO series_fts_documents (document_id, series_id, content_json)
+        SELECT rowid, series_id, json_array(title, author, description, tags) FROM series_fts;
+      DROP INDEX IF EXISTS volumes_series_idx;
+      DROP INDEX IF EXISTS chapters_volume_idx;
+      DROP INDEX IF EXISTS pages_chapter_idx;
+    `);
+    db.prepare("UPDATE app_meta SET value = ? WHERE key = 'schema_version'").run(String(STORE_SCHEMA_VERSION));
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -245,9 +285,19 @@ export function initializeStoreSchema(db) {
     PRAGMA temp_store = MEMORY;
   `);
 
-  if (getSchemaVersion(db) !== STORE_SCHEMA_VERSION) {
+  const version = getSchemaVersion(db);
+  if (version === 4 || version === 5) {
+    migratePerformanceSchema(db, version);
+  } else if (version !== STORE_SCHEMA_VERSION) {
     resetSchema(db);
   }
+
+  // Also seed existing v6 databases. Catalog feature caches must survive progress/favorite writes,
+  // while a fresh key starts from the current visible revision rather than moving backwards.
+  db.exec(`
+    INSERT OR IGNORE INTO app_meta (key, value)
+      SELECT 'catalog_revision', value FROM app_meta WHERE key = 'revision';
+  `);
 
   // PRAGMA foreign_keys 是连接级设置，重建之后再次确保开启。
   db.exec('PRAGMA foreign_keys = ON;');

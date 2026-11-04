@@ -1,0 +1,39 @@
+name: Web performance and navigation
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ["web/**", ".github/workflows/test-web.yml"]
+  pull_request:
+    paths: ["web/**", ".github/workflows/test-web.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install CI dependencies
+        run: npm --prefix web install --no-audit --no-fund
+      - name: Unit regression tests
+        run: npm --prefix web run test:unit
+      - name: Typecheck and build
+        run: npm --prefix web run build
+      - name: Check complete route budgets
+        run: npm --prefix web run check:budget
+      - name: Install CI browser
+        run: node web/node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: Browser navigation and performance regressions
+        run: npm --prefix web run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: web-test-results
+          path: web/test-results/
+          if-no-files-found: ignore

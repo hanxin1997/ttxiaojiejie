@@ -257,30 +257,37 @@ async function request<T>(
   }
 
   const currentController = cancelKey ? abortControllers.get(cancelKey) : null
-  let response: Response
   try {
-    response = await fetch(url, {
+    const response = await fetch(url, {
       headers: defaultHeaders,
       ...fetchOptions,
       signal,
     })
+
+    if (!response.ok) {
+      const payload = await response.json().catch((error) => {
+        if (signal?.aborted) throw error
+        return { error: response.statusText }
+      })
+      throw new ApiError(payload.error || `请求失败 (${response.status})`, response.status)
+    }
+
+    // Headers can arrive long before the body. Keep ownership until JSON is consumed.
+    return await response.json() as T
   } finally {
     if (cancelKey && abortControllers.get(cancelKey) === currentController) {
       abortControllers.delete(cancelKey)
     }
   }
 
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({ error: response.statusText }))
-    throw new ApiError(payload.error || `请求失败 (${response.status})`, response.status)
-  }
-
-  return response.json() as Promise<T>
 }
 
 // ===== Exported API Methods =====
 
 export const api = {
+  cancelDetailRequests() {
+    for (const key of ['series-detail', 'series-metadata', 'series-recommendations', 'chapter-pages']) cancelPending(key)
+  },
   /** 高频刷新只读取运行状态与单调 revision。 */
   getRuntimeState(): Promise<RuntimeState> {
     return request<RuntimeState>('/api/state', { cancelKey: 'app-state' })
@@ -447,7 +454,7 @@ export const api = {
 
   /** 获取元数据 */
   getSeriesMetadata(id: string): Promise<MetadataResponse> {
-    return request(`/api/series/${id}/metadata`)
+    return request(`/api/series/${id}/metadata`, { cancelKey: 'series-metadata' })
   },
 
   /** 更新元数据 */
@@ -472,7 +479,7 @@ export const api = {
   },
 
   getSeriesRecommendations(id: string, limit = 8): Promise<{ items: RecommendationItem[] }> {
-    return request(`/api/series/${id}/recommendations?limit=${limit}`)
+    return request(`/api/series/${id}/recommendations?limit=${limit}`, { cancelKey: 'series-recommendations' })
   },
 
   createMetadataJob(options: {

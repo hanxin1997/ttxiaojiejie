@@ -33,6 +33,22 @@ class FolderLibraryApiTest {
     }
 
     @Test
+    fun `eink preset reaches pagination and image URL requests`() = runBlocking {
+        val preset = resolveReaderPreferences(true, "80", READING_ORIGINAL, false)
+        val presetApi = FolderLibraryApi(
+            client = OkHttpClient(),
+            headers = headersOf("Accept", "application/json"),
+            baseUrl = { server.url("/").toString().trimEnd('/') },
+            pageSize = { preset.pageSize },
+        )
+        server.enqueue(MockResponse().setBody("""{"items":[],"total":21,"page":1,"pageSize":20,"totalPages":2,"revision":1}"""))
+        assertEquals(2, presetApi.series(1).totalPages)
+        assertEquals("20", server.takeRequest().requestUrl?.queryParameter("pageSize"))
+        val payload = ChapterPagesDto(chapterId = "chapter-1", pageCount = 1, urlTemplate = "/media/chapter/chapter-1/{pageIndex}")
+        assertTrue(presetApi.pageImageUrls(payload, preset.readingMode, preset.mono).single().endsWith("variant=reader-lite-mono"))
+    }
+
+    @Test
     fun `series forwards pagination search category and computes next page`() = runBlocking {
         server.enqueue(
             MockResponse()
