@@ -2,7 +2,7 @@
 
 日期：2026-11-05（Asia/Shanghai）
 
-状态：SDK 修复已推送并在 CI 通过；重试消除 Gradle 下载 HTTP 504 后，正在修复新增 Kotlin 文件命名检查。
+状态：已完成并推送。2026-11-06 核对提交 `4e44a5d` 的 Mihon 构建、测试、签名和 APK 上传全部成功，同提交服务端 CI 也通过。
 
 ## 证据与调用链
 
@@ -31,7 +31,7 @@
 - [x] 落地修复方案和文件清单。
 - [x] 回归检查先确认未显式配置 packages 时失败，再修复工作流。
 - [x] 提交推送并核对远程提交：`6179c41`，本地 deployment 8/8 通过。
-- [ ] 新构建完成测试、APK、签名和上传。
+- [x] 新构建完成测试、APK、签名和上传：运行 `42063276395`、job `127370427578` 全部 success。
 
 ## 后续构建暴露的问题（2026-11-06）
 
@@ -46,3 +46,12 @@
 - 固定 Keiyoushi 的 `libs.versions.toml` 声明 extensions-lib v1.6 提交 `6e0c96cea8`。读取该提交的 `Preference.java` 确认只有 `setEnabled(boolean)` 没有 getter；`PreferenceScreen.java` 只有 `addPreference` 和 `getContext`，没有 `findPreference`。
 - 最终选择保持设置禁用联动：`FolderLibrary.kt` 在构建屏幕时保存三个自定义 Preference 的局部引用，预设 listener 直接调用已存在的 `setEnabled`，初始化也使用方法调用。这样无需引用不存在的查找方法或 Kotlin 合成属性，运行时墨水屏优先/关闭恢复保持完整。
 - 修改同一部署回归测试增加已知 stub 不支持成员的检查，先确认失败再修；追加 CLAUDE 规则，继续真实 CI 编译和单测。无需添加 AndroidX 依赖或更换底座。
+
+## 最终验证与产物
+
+- 本地部署回归 9/9 通过，新增两项检查均先确认失败再修复；`git diff --check` 通过。
+- 代码修复提交：`6179c41`（SDK packages）、`fa1e7a2`（Kotlin 文件命名）、`4e44a5d`（固定 Preference stub 兼容）。
+- [Mihon 成功构建](https://github.com/hanxin1997/ttxiaojiejie/actions/runs/42063276395)：SDK、Spotless、MockWebServer 单测、release 编译、固定证书签名校验、上传全部通过。
+- Artifact：`mihon-folder-library-1.6-apk`，ID `13430744840`，41,202 字节，核对时未过期。下载页：<https://github.com/hanxin1997/ttxiaojiejie/actions/runs/42063276395/artifacts/13430744840>。
+- [同提交服务端检查](https://github.com/hanxin1997/ttxiaojiejie/actions/runs/42063276368) success，使用 CI 的真实 ZIP/Sharp 依赖验证；本次没有更改 Web，也未声称 Web workflow 或墨水屏真机测试已通过。
+- 未在本地安装依赖或运行 Docker；新 APK 可使用同一签名覆盖安装，安装后的真机阅读效果仍需设备验证。
