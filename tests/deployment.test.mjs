@@ -2,6 +2,16 @@ import fs from 'node:fs/promises';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+test('Mihon SDK setup explicitly excludes the unavailable legacy tools package', async () => {
+  const workflow = await fs.readFile(new URL('../.github/workflows/build-mihon-extension.yml', import.meta.url), 'utf8');
+  const sdkStep = workflow.match(/^[ \t]+- name: Set up Android SDK\r?\n([\s\S]*?)(?=^[ \t]+- name:)/m)?.[1];
+  assert.ok(sdkStep, 'the SDK initialization step must exist');
+  const configured = sdkStep.match(/^\s+packages:\s*([^\r\n]+)/m)?.[1];
+  assert.ok(configured, 'setup-android defaults to unavailable tools; packages must be explicit');
+  const packages = configured.replaceAll(/["']/g, '').trim().split(/\s+/);
+  assert.deepEqual(packages, ['platform-tools']);
+});
+
 test('runtime container installs production dependencies so Sharp cannot silently disappear', async () => {
   const dockerfile = await fs.readFile(new URL('../Dockerfile', import.meta.url), 'utf8');
   const runtimeStage = dockerfile.substring(dockerfile.indexOf('FROM node:24-alpine\nWORKDIR /app'));

@@ -86,6 +86,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # action 默认包含已从仓库移除的 tools；平台/build-tools 由 AGP 按固定底座选择。
+          packages: platform-tools
 
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
