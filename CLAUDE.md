@@ -12,3 +12,4 @@
 - 运行 Node 单测前先核对 package.json 的测试脚本，沿用本项目的 `--test-isolation=none` 参数；不要无意切回默认子进程隔离而触发本地受限环境的 `spawn EPERM` 和额外权限等待。
 - 用户明确要求全部优化一起实施时，应覆盖已审查的全部范围，不再擅自缩为首批；涉及低配墨水屏时，同时核对 Mihon 分页、服务端省流/灰度、缓存与阅读响应，不把设备负担转移为客户端图像处理。
 - Mihon CI 的 Android SDK 初始化必须显式声明仍可用的包（如 platform-tools），不继承 setup-android 的旧 tools 默认包；失败时先核对原始日志中的实际命令及 action 固定提交，不能将弃用警告误判为根因。
+- 新增 Kotlin 文件只有一个类及相关顶层函数时，文件名必须匹配该类名（ktlint standard:filename）；本地无完整 Android/Spotless 环境时，推送后必须核对真实 CI，不能把语法或 Node 检查当作 Kotlin 格式验证。

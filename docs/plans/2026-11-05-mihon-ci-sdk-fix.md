@@ -2,7 +2,7 @@
 
 日期：2026-11-05（Asia/Shanghai）
 
-状态：已确认日志根因，正在修复和验证。承接用户已批准的全部优化及推送，本次完成失败构建的必要修复并跟踪新构建。
+状态：SDK 修复已推送并在 CI 通过；重试消除 Gradle 下载 HTTP 504 后，正在修复新增 Kotlin 文件命名检查。
 
 ## 证据与调用链
 
@@ -30,5 +30,12 @@
 - [x] 获取失败步骤、原始日志及实际 action 参数。
 - [x] 落地修复方案和文件清单。
 - [x] 回归检查先确认未显式配置 packages 时失败，再修复工作流。
-- [ ] 提交推送并核对远程提交。
+- [x] 提交推送并核对远程提交：`6179c41`，本地 deployment 8/8 通过。
 - [ ] 新构建完成测试、APK、签名和上传。
+
+## 后续构建暴露的问题（2026-11-06）
+
+- 新运行 `42046702791` 首次 attempt 的 SDK 步骤成功；Gradle 分发下载返回 HTTP 504。未修改 Gradle 版本，使用现有授权重试失败任务。
+- 第二次 attempt 的 job `127361548640` 成功下载并启动 Gradle 9.6.1，`spotlessKotlinCheck` 失败，明确报 `FolderLibraryPreferences.kt:L1 ktlint(standard:filename)`：唯一类为 ReaderPreferences，文件应命名 ReaderPreferences.kt。这是前次新增代码的命名疏漏。
+- 最小修复：将 `mihon/keiyoushi-module/src/eu/kanade/tachiyomi/extension/all/folderlibrary/FolderLibraryPreferences.kt` 重命名为同目录 `ReaderPreferences.kt`，内容和所有调用保持一致；更新方案中的当前文件名及 CLAUDE 规则。
+- 已有真实 CI 失败即复现；不额外编写只断言文件名的实现镜像测试。保留 Spotless 作为真正验收，推送后继续跟踪测试、APK、签名和上传。

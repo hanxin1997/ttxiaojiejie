@@ -156,7 +156,7 @@ Mihon 已具备分页、流式 JSON 解码、协程取消、图片三档与灰�
 - `tests/database-write-worker.test.mjs`、`tests/archive-index-cache.test.mjs`、`tests/catalog-queries.test.mjs`；媒体、扫描、存储、运行态、缩略图在既有测试中扩展。
 - `benchmarks/write-benchmark.mjs`、`benchmarks/media-benchmark.mjs`；原 catalog 基准新增 5 万真实章节的辅助查询场景，scan 基准新增线性操作次数及耗时门槛。
 - `web/src/utils/reader.ts`、`web/scripts/bundle-graph.mjs`、`web/tests/navigation.test.mjs`、`web/tests/reader.test.mjs`、`web/tests/budgets.test.mjs`、`web/e2e/fixtures.ts`、`web/e2e/navigation.spec.ts`、`.github/workflows/test-web.yml`。
-- `mihon/keiyoushi-module/src/eu/kanade/tachiyomi/extension/all/folderlibrary/FolderLibraryPreferences.kt` 和对应 `test/.../FolderLibraryPreferencesTest.kt`；模块 versionCode 4→5，固定 Keiyoushi 构建入口不变。
+- `mihon/keiyoushi-module/src/eu/kanade/tachiyomi/extension/all/folderlibrary/ReaderPreferences.kt`（后续 CI 按类名重命名）和对应 `test/.../FolderLibraryPreferencesTest.kt`；模块 versionCode 4→5，固定 Keiyoushi 构建入口不变。
 
 本地验证结果（耗时为单机合成数据，不承诺实际 NAS/墨水屏同倍数）：
 
