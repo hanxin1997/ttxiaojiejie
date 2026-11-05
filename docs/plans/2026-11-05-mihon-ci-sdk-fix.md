@@ -39,3 +39,10 @@
 - 第二次 attempt 的 job `127361548640` 成功下载并启动 Gradle 9.6.1，`spotlessKotlinCheck` 失败，明确报 `FolderLibraryPreferences.kt:L1 ktlint(standard:filename)`：唯一类为 ReaderPreferences，文件应命名 ReaderPreferences.kt。这是前次新增代码的命名疏漏。
 - 最小修复：将 `mihon/keiyoushi-module/src/eu/kanade/tachiyomi/extension/all/folderlibrary/FolderLibraryPreferences.kt` 重命名为同目录 `ReaderPreferences.kt`，内容和所有调用保持一致；更新方案中的当前文件名及 CLAUDE 规则。
 - 已有真实 CI 失败即复现；不额外编写只断言文件名的实现镜像测试。保留 Spotless 作为真正验收，推送后继续跟踪测试、APK、签名和上传。
+
+## 固定偏好 API 的编译兼容修复
+
+- `fa1e7a2` 的运行 `42061466033`（job `127364001648`）已通过 Spotless；Debug/Release 编译均明确报 `findPreference`、`isEnabled` 不可解析。
+- 固定 Keiyoushi 的 `libs.versions.toml` 声明 extensions-lib v1.6 提交 `6e0c96cea8`。读取该提交的 `Preference.java` 确认只有 `setEnabled(boolean)` 没有 getter；`PreferenceScreen.java` 只有 `addPreference` 和 `getContext`，没有 `findPreference`。
+- 最终选择保持设置禁用联动：`FolderLibrary.kt` 在构建屏幕时保存三个自定义 Preference 的局部引用，预设 listener 直接调用已存在的 `setEnabled`，初始化也使用方法调用。这样无需引用不存在的查找方法或 Kotlin 合成属性，运行时墨水屏优先/关闭恢复保持完整。
+- 修改同一部署回归测试增加已知 stub 不支持成员的检查，先确认失败再修；追加 CLAUDE 规则，继续真实 CI 编译和单测。无需添加 AndroidX 依赖或更换底座。

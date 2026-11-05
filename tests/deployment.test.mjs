@@ -12,6 +12,16 @@ test('Mihon SDK setup explicitly excludes the unavailable legacy tools package',
   assert.deepEqual(packages, ['platform-tools']);
 });
 
+test('Mihon preference controls use only the setters exposed by the pinned extension stubs', async () => {
+  const source = await fs.readFile(new URL(
+    '../mihon/keiyoushi-module/src/eu/kanade/tachiyomi/extension/all/folderlibrary/FolderLibrary.kt', import.meta.url,
+  ), 'utf8');
+  // extensions-lib 6e0c96cea8 has setEnabled, but no getter or screen lookup API.
+  assert.doesNotMatch(source, /\bfindPreference\s*[<(]/);
+  assert.doesNotMatch(source, /\bisEnabled\s*=/);
+  assert.match(source, /\.setEnabled\(value != true\)/);
+});
+
 test('runtime container installs production dependencies so Sharp cannot silently disappear', async () => {
   const dockerfile = await fs.readFile(new URL('../Dockerfile', import.meta.url), 'utf8');
   const runtimeStage = dockerfile.substring(dockerfile.indexOf('FROM node:24-alpine\nWORKDIR /app'));

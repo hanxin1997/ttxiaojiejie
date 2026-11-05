@@ -13,3 +13,4 @@
 - 用户明确要求全部优化一起实施时，应覆盖已审查的全部范围，不再擅自缩为首批；涉及低配墨水屏时，同时核对 Mihon 分页、服务端省流/灰度、缓存与阅读响应，不把设备负担转移为客户端图像处理。
 - Mihon CI 的 Android SDK 初始化必须显式声明仍可用的包（如 platform-tools），不继承 setup-android 的旧 tools 默认包；失败时先核对原始日志中的实际命令及 action 固定提交，不能将弃用警告误判为根因。
 - 新增 Kotlin 文件只有一个类及相关顶层函数时，文件名必须匹配该类名（ktlint standard:filename）；本地无完整 Android/Spotless 环境时，推送后必须核对真实 CI，不能把语法或 Node 检查当作 Kotlin 格式验证。
+- Mihon 的 AndroidX Preference 是 extensions-lib 精简 stub，调用前核对固定提交：只有 setEnabled 时直接调用方法，不假设存在 Kotlin isEnabled 属性；PreferenceScreen 没有 findPreference 时保存已创建的控件引用，不为此引入完整 AndroidX 依赖。

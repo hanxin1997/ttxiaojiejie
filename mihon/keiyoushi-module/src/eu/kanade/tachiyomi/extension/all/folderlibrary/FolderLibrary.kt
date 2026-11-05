@@ -107,15 +107,17 @@ abstract class FolderLibrary :
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         val einkPreset = preferences.getBoolean(PREF_EINK_PRESET, false)
+        // The extension stubs expose setters but no screen lookup or enabled getter.
+        val customPreferences = mutableListOf<Preference>()
         SwitchPreferenceCompat(screen.context).apply {
             key = PREF_EINK_PRESET
             title = "低配墨水屏预设"
-            summary = "每页 20 部作品，省流灰度图片；转换由服务端完成。关闭后恢复下方原有设置。"
+            summary = "开启时优先使用每页 20 部作品、省流灰度图片；转换由服务端完成。关闭后恢复下方原有设置。"
             setDefaultValue(false)
             setOnPreferenceChangeListener { _, value ->
                 // The preset never overwrites the user's custom quality or paging choices.
-                for (preferenceKey in listOf(PREF_PAGE_SIZE, PREF_READING_MODE, PREF_MONO_OUTPUT)) {
-                    screen.findPreference<Preference>(preferenceKey)?.isEnabled = value != true
+                for (preference in customPreferences) {
+                    preference.setEnabled(value != true)
                 }
                 true
             }
@@ -123,31 +125,40 @@ abstract class FolderLibrary :
 
         ListPreference(screen.context).apply {
             key = PREF_PAGE_SIZE
-            isEnabled = !einkPreset
+            setEnabled(!einkPreset)
             title = "每页作品数"
             entries = arrayOf("20（低配）", "40（推荐）", "80")
             entryValues = arrayOf("20", "40", "80")
             setDefaultValue(DEFAULT_PAGE_SIZE.toString())
             summary = "%s"
-        }.also(screen::addPreference)
+        }.also {
+            customPreferences.add(it)
+            screen.addPreference(it)
+        }
 
         ListPreference(screen.context).apply {
             key = PREF_READING_MODE
-            isEnabled = !einkPreset
+            setEnabled(!einkPreset)
             title = "阅读图片"
             entries = arrayOf("原图", "平衡（1600px / WebP 80）", "省流（1280px / WebP 70）")
             entryValues = arrayOf(READING_ORIGINAL, READING_BALANCED, READING_LITE)
             setDefaultValue(READING_ORIGINAL)
             summary = "%s"
-        }.also(screen::addPreference)
+        }.also {
+            customPreferences.add(it)
+            screen.addPreference(it)
+        }
 
         SwitchPreferenceCompat(screen.context).apply {
             key = PREF_MONO_OUTPUT
-            isEnabled = !einkPreset
+            setEnabled(!einkPreset)
             title = "墨水屏灰度输出"
             summary = "服务端预先转灰度，设备省去实时去色开销；彩页会变黑白。"
             setDefaultValue(false)
-        }.also(screen::addPreference)
+        }.also {
+            customPreferences.add(it)
+            screen.addPreference(it)
+        }
     }
 
     private fun SeriesListResponse.toMangasPage(): MangasPage {
